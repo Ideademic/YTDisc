@@ -224,9 +224,15 @@ jobs:
           curl --fail --show-error --location --retry 5 --retry-delay 5 \
             --output linuxdeploy \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          # NOTE: linuxdeploy-plugin-gtk no longer publishes GitHub
+          # Releases (the repo went unmaintained Oct 2023; the
+          # /releases/download/continuous/ URL now 404s — that's what
+          # was tanking the build). Fetch the script directly from the
+          # repo's master branch instead. Pin to a commit if you ever
+          # need reproducibility.
           curl --fail --show-error --location --retry 5 --retry-delay 5 \
             --output linuxdeploy-plugin-gtk.sh \
-            https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk.sh
+            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
           chmod +x linuxdeploy linuxdeploy-plugin-gtk.sh
           ./linuxdeploy \
             --appdir AppDir \
