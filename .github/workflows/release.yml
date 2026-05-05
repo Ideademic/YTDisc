@@ -238,8 +238,13 @@ jobs:
             --appdir AppDir \
             --plugin gtk \
             --output appimage
-          # linuxdeploy names the file <Name>-<arch>.AppImage by default
-          mv YTDisc-*.AppImage YTDisc-x86_64.AppImage
+          # linuxdeploy names the file <Name>-<arch>.AppImage. With
+          # Name=YTDisc on x86_64 that's exactly "YTDisc-x86_64.AppImage"
+          # — the name we want — so usually this rename is a no-op.
+          # The conditional handles the case where a future linuxdeploy
+          # version inserts a version segment (e.g. YTDisc-1.0-x86_64)
+          # without erroring on the source==dest case we just hit.
+          [ -f YTDisc-x86_64.AppImage ] || mv YTDisc-*.AppImage YTDisc-x86_64.AppImage
 
       - name: Upload to release
         if: github.event_name == 'release'
