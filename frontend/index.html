@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YTDisc</title>
+    <link rel="stylesheet" href="src/style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <!-- Three Finder-style columns. JS populates them. -->
+      <section class="col col-channels" aria-label="Channels">
+        <header class="col-header">
+          <span>Channels</span>
+          <button
+            class="add-btn edit-only"
+            id="add-channel-btn"
+            title="New channel"
+            aria-label="Add channel"
+          >+</button>
+        </header>
+        <ul id="channel-list" class="list"></ul>
+      </section>
+
+      <section class="col col-videos" aria-label="Videos">
+        <header class="col-header">
+          <span id="videos-header">Videos</span>
+          <span class="col-header-actions">
+            <button
+              class="add-btn edit-only"
+              id="add-folder-btn"
+              title="New folder"
+              aria-label="Add folder"
+            >📁</button>
+            <button
+              class="add-btn edit-only"
+              id="add-video-btn"
+              title="Add videos via yt-dlp"
+              aria-label="Add videos"
+            >+</button>
+          </span>
+        </header>
+        <ul id="video-list" class="list"></ul>
+      </section>
+
+      <section class="col col-detail" aria-label="Details">
+        <div id="detail" class="detail-empty">
+          <p>Select a video</p>
+        </div>
+      </section>
+
+      <!-- Player overlay; hidden until Play is clicked. The X close
+           and title overlay are siblings of the <video>, so when the
+           video itself enters fullscreen they're not visible (only
+           the fullscreened element shows). -->
+      <div id="player" class="player hidden">
+        <div class="player-controls">
+          <button id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen (f)">⛶</button>
+          <button id="player-close" aria-label="Close" title="Close (esc)">×</button>
+        </div>
+        <video id="player-video" controls></video>
+        <div id="player-title"></div>
+      </div>
+
+      <!-- "Set thumbnail" modal -->
+      <div id="thumb-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2>Set thumbnail</h2>
+            <button class="modal-close" id="thumb-modal-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">Paste a YouTube link or video ID:</p>
+            <div class="modal-row">
+              <input
+                type="text"
+                id="thumb-url-input"
+                placeholder="https://youtu.be/dQw4w9WgXcQ"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button id="thumb-fetch-btn" class="primary">Fetch</button>
+            </div>
+            <p class="modal-hint modal-status" id="thumb-modal-status"></p>
+            <hr />
+            <p class="modal-hint">Or import a local image file:</p>
+            <div class="modal-row">
+              <button id="thumb-import-btn">Choose file…</button>
+            </div>
+            <hr />
+            <div class="modal-row">
+              <button id="thumb-clear-btn" class="danger">Remove thumbnail</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "Add channel" modal -->
+      <div id="channel-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2 id="channel-modal-title">New channel</h2>
+            <button class="modal-close" id="channel-modal-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">Channel name (this becomes the folder name under Videos/).</p>
+            <div class="modal-row">
+              <input
+                type="text"
+                id="channel-name-input"
+                placeholder="Channel name"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <p class="modal-hint modal-status" id="channel-modal-status"></p>
+            <div class="modal-row">
+              <button id="channel-save-btn" class="primary">Save</button>
+              <button id="channel-cancel-btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "Add videos" modal -->
+      <div id="addvideo-modal" class="modal hidden">
+        <div class="modal-card modal-card-wide">
+          <header class="modal-header">
+            <h2>Add videos to <span id="addvideo-target"></span></h2>
+            <button class="modal-close" id="addvideo-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">
+              Paste one or more YouTube URLs (one per line). Playlist
+              links create a new folder under the channel and download
+              every entry into it.
+            </p>
+            <textarea
+              id="addvideo-urls"
+              rows="6"
+              placeholder="https://youtu.be/dQw4w9WgXcQ&#10;https://www.youtube.com/playlist?list=PL…"
+              spellcheck="false"
+            ></textarea>
+            <div class="modal-row modal-row-inline">
+              <label for="addvideo-quality" class="inline-label">Quality:</label>
+              <select id="addvideo-quality">
+                <option value="fhd" selected>FHD (1080p)</option>
+                <option value="hd">HD (720p)</option>
+                <option value="sd">SD (480p)</option>
+              </select>
+            </div>
+            <div id="addvideo-progress" class="addvideo-progress hidden">
+              <div class="progress-summary" id="addvideo-summary"></div>
+              <pre class="progress-log" id="addvideo-log"></pre>
+            </div>
+            <div class="modal-row">
+              <button id="addvideo-start" class="primary">Start downloading</button>
+              <button id="addvideo-cancel">Close</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "New folder" modal -->
+      <div id="folder-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2>New folder in <span id="folder-modal-channel"></span></h2>
+            <button class="modal-close" id="folder-modal-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">Folders group videos within a channel. They can't be nested inside other folders.</p>
+            <div class="modal-row">
+              <input
+                type="text"
+                id="folder-name-input"
+                placeholder="Folder name"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <p class="modal-hint modal-status" id="folder-modal-status"></p>
+            <div class="modal-row">
+              <button id="folder-save-btn" class="primary">Save</button>
+              <button id="folder-cancel-btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "Move video to folder" modal -->
+      <div id="move-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2>Move <span id="move-modal-name"></span></h2>
+            <button class="modal-close" id="move-modal-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">Pick a destination inside <span id="move-modal-channel"></span>:</p>
+            <ul id="move-dest-list" class="move-dest-list"></ul>
+            <p class="modal-hint modal-status" id="move-modal-status"></p>
+            <div class="modal-row">
+              <button id="move-cancel-btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "Rename" modal (shared between channel and video rename) -->
+      <div id="rename-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2 id="rename-modal-title">Rename</h2>
+            <button class="modal-close" id="rename-modal-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint" id="rename-modal-hint"></p>
+            <div class="modal-row">
+              <input
+                type="text"
+                id="rename-input"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <p class="modal-hint modal-status" id="rename-status"></p>
+            <div class="modal-row">
+              <button id="rename-save-btn" class="primary">Rename</button>
+              <button id="rename-cancel-btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- "Confirm" modal — used for delete-channel, delete-video,
+           delete-folder, and empty-folder. Buttons are reconfigured
+           per-use by the JS that opens the modal. -->
+      <div id="confirm-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2 id="confirm-title">Delete</h2>
+            <button class="modal-close" id="confirm-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p id="confirm-message"></p>
+            <p class="modal-hint" id="confirm-hint">
+              Moves to <code>Videos/.trash/</code> — recoverable until you delete
+              that folder manually.
+            </p>
+            <div class="modal-row">
+              <button id="confirm-yes" class="danger-primary">Move to trash</button>
+              <button id="confirm-yes-alt" class="hidden">Empty</button>
+              <button id="confirm-no">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status bar with edit toggle. -->
+      <div id="status-bar">
+        <span id="status-stats"></span>
+        <button id="edit-toggle" class="edit-toggle">Loading…</button>
+      </div>
+    </main>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
