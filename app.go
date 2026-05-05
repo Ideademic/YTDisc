@@ -153,7 +153,7 @@ func (a *App) Channels() []ChannelInfo {
 	for _, c := range a.library.Channels {
 		out = append(out, ChannelInfo{
 			Name:       c.Name,
-			VideoCount: len(c.Videos),
+			VideoCount: c.totalVideoCount(),
 			TotalSecs:  c.TotalSeconds(),
 		})
 	}
