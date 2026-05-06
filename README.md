@@ -41,7 +41,8 @@ it. Nothing is written outside that folder.
   2. Sidecar image: `{name}.jpg`/`.jpeg`/`.png`/`.webp` next to the video
   3. Manual fetch from YouTube via paste-URL (no API key)
   4. Manual import from local image file
-- Optional edit mode (requires yt-dlp + ffmpeg + internet):
+- Optional edit mode (just needs an internet connection — yt-dlp ships
+  embedded, ffmpeg is no longer required):
   - Add / rename / delete channels and folders
   - Add videos and playlists by pasting YouTube URLs
   - Move videos between folders
