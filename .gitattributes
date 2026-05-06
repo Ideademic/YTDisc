@@ -1,0 +1,9 @@
+# Treat embedded yt-dlp binaries as binary so Windows checkouts don't
+# CRLF-mangle them and Git's binary-diff stays compact. The committed
+# files are 1-byte placeholders (real binaries are fetched into these
+# paths by tools/fetch-ytdlp.sh before `wails build`), but tagging
+# them now means we're robust even if a real binary ever gets
+# committed by accident.
+bundled/yt-dlp_macos binary
+bundled/yt-dlp.exe   binary
+bundled/yt-dlp_linux binary

@@ -75,24 +75,28 @@ Just Works — no installer, no system files written outside the drive.
 You _can_ also use it locally on an internal SSD if you want — the
 app doesn't care. The portable design just means it doesn't have to.
 
-## Optional: yt-dlp + ffmpeg for editing
+## Optional: ffmpeg for editing
 
-The library editing UI is gated on yt-dlp + ffmpeg being installed and
-internet being available. Install via Homebrew on Mac:
+**yt-dlp ships inside the app as of v1.1.0** — no install needed.
+The first time you click "Edit" the bundled yt-dlp is extracted into
+`Videos/.bin/` so it travels with your USB stick.
+
+The library editing UI is gated on **ffmpeg** being installed and
+internet being available. ffmpeg is what yt-dlp uses to merge the
+separate video and audio streams YouTube serves at higher
+resolutions (≥1080p DASH formats). Install via Homebrew on Mac:
 
 ```sh
-brew install yt-dlp ffmpeg
+brew install ffmpeg
 ```
 
-Without ffmpeg, downloads of >720p videos fail — yt-dlp uses ffmpeg
-to merge the separate video and audio streams YouTube serves at
-higher resolutions. With both installed, the edit toggle in the
-status bar lights up. If you install them with the app already
-running, click the disabled badge to re-check.
+If ffmpeg is missing, the edit toggle in the status bar shows
+"ffmpeg not installed". Click it to re-check after installing —
+no app restart needed.
 
 ## Building from source
 
-Requires Go 1.25+, Node 18+, and Wails CLI v2:
+Requires Go 1.25+, Node 22+, and Wails CLI v2:
 
 ```sh
 go install github.com/wailsapp/wails/v2/cmd/wails@latest
@@ -102,10 +106,18 @@ Then in the project directory:
 
 ```sh
 go mod tidy
+tools/fetch-ytdlp.sh                        # download yt-dlp into bundled/
 wails build -platform darwin/universal      # universal Mac binary
 wails build -platform windows/amd64         # Windows
 wails build -platform linux/amd64           # Linux (needs WebKit2GTK)
 ```
+
+The repo only commits 1-byte placeholders for the embedded yt-dlp
+binaries — `tools/fetch-ytdlp.sh` replaces them with the real
+~25 MB standalone bundles before `wails build` runs `go:embed`.
+You can skip the fetch step for a dev build that doesn't need
+edit-mode downloads (the app falls back to PATH-based yt-dlp
+discovery when the embed is the placeholder).
 
 Output is in `build/bin/`. For dev with hot reload, use `wails dev`.
 
@@ -121,7 +133,10 @@ Output is in `build/bin/`. For dev with hot reload, use `wails dev`.
 - `video_handler.go` — HTTP handler with Range support for `<video>`
   + symlink-aware path-traversal guard
 - `pathfix.go` — prepends Homebrew paths so Finder-launched apps can
-  find yt-dlp / ffmpeg
+  find ffmpeg
+- `bundled/` — `go:embed`'d yt-dlp standalone binaries per platform
+- `tools/fetch-ytdlp.sh` — downloads real yt-dlp into `bundled/`
+  before `wails build`
 - `frontend/` — vanilla HTML/CSS/JS, no bundler
 
 See [CLAUDE.md](CLAUDE.md) for deeper architecture notes.

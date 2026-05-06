@@ -21,7 +21,7 @@ Output lands in `build/bin/`. The frontend has no test runner and no Go tests ex
 
 The frontend "build" (`frontend/build.js`) just copies `index.html` + `src/` into `dist/`. Wails embeds `frontend/dist` via `//go:embed all:frontend/dist` in [main.go](main.go), so the dist folder must exist (even if empty) for `go build` to succeed standalone.
 
-For runtime editing features, the user needs `yt-dlp` and `ffmpeg` on PATH (`brew install yt-dlp ffmpeg`).
+For runtime editing features, the user needs `ffmpeg` on PATH (`brew install ffmpeg`). yt-dlp ships embedded inside the binary and self-extracts on first use — see the "Editor + capability gating" section.
 
 ## Architecture
 
@@ -54,7 +54,9 @@ Channels with zero videos are still included in the scan so newly-created empty 
 Cache key is `sha1(absVideoPath)`. Cached files live in `Videos/.thumbs/<sha1>.jpg`. If that directory isn't writable (read-only USB), we fall back to an in-memory map (`App.memThumbs`). Any rename (channel or video) must call `migrateThumbCache` because the cache is keyed on the absolute path.
 
 ### Editor + capability gating
-[editor.go](editor.go) exposes channel/folder/video CRUD plus `AddVideos` (yt-dlp invocation). The "edit mode" toggle in the UI is gated on `EditCapability.Enabled`, which requires yt-dlp + ffmpeg + internet. Capability is cached for 8s and re-checked when the user clicks the badge (`RefreshEditCapability`). yt-dlp/ffmpeg discovery uses `exec.LookPath` first, then a hardcoded fallback list of Homebrew/MacPorts/`~/.local/bin` paths — even when those are on PATH, returning an absolute path is bulletproof against child-process PATH resets.
+[editor.go](editor.go) exposes channel/folder/video CRUD plus `AddVideos` (yt-dlp invocation). The "edit mode" toggle in the UI is gated on `EditCapability.Enabled`, which requires yt-dlp + ffmpeg + internet. Capability is cached for 8s and re-checked when the user clicks the badge (`RefreshEditCapability`).
+
+**yt-dlp ships embedded.** [bundled/](bundled/) `go:embed`s a per-platform yt-dlp standalone binary (PyInstaller bundle, ~25 MB) and `App.resolveYtdlpPath` extracts it into `Videos/.bin/yt-dlp[.exe]` on first use, atomically (tmp + rename, size-equality skip-rewrite). The repo only commits 1-byte placeholders; `tools/fetch-ytdlp.sh` populates the real binaries before `wails build`, both locally and in the GitHub Actions release workflow. `bundled.HasEmbeddedYtdlp()` returns true only when the embed is `>= 1 MB`, so developer builds without the fetch step transparently fall back to PATH-based discovery (`findCommand`). ffmpeg discovery still uses PATH only — embedding ffmpeg is planned for a future release once the mp4ff-based muxer lands.
 
 Folder operations:
 - `CreateFolder` / `RenameFolder` / `DeleteFolder` — straightforward; `RenameFolder` snapshots the old absolute paths before `os.Rename` so cache migration can run after.

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"ytdisc/bundled"
 )
 
 // ---------------------------------------------------------------------------
@@ -78,7 +80,7 @@ func (a *App) GetEditCapability() EditCapability {
 	if v, ok := a.editCap.get(); ok {
 		return v
 	}
-	cap := computeEditCapability()
+	cap := a.computeEditCapability()
 	a.editCap.set(cap)
 	return cap
 }
@@ -86,21 +88,30 @@ func (a *App) GetEditCapability() EditCapability {
 // RefreshEditCapability invalidates the cache and recomputes. The
 // frontend calls this when the user clicks the (possibly disabled)
 // edit badge — gives them an immediate way to retry after fixing
-// network or installing yt-dlp.
+// network or installing ffmpeg.
 func (a *App) RefreshEditCapability() EditCapability {
 	a.editCap.invalidate()
 	return a.GetEditCapability()
 }
 
-func computeEditCapability() EditCapability {
+// computeEditCapability resolves yt-dlp and ffmpeg paths and probes
+// the network. yt-dlp is preferred-resolved from the binary embedded
+// in this app (`bundled.Ytdlp`, extracted into Videos/.bin/) and
+// falls back to a PATH lookup when there's no embedded binary —
+// which happens on developer builds that haven't run
+// `tools/fetch-ytdlp.sh`. Released binaries always have an embedded
+// yt-dlp, so end users see "edit mode" enabled without ever having
+// to install yt-dlp themselves. ffmpeg is still resolved from PATH
+// only — embedding ffmpeg is planned for a later release.
+func (a *App) computeEditCapability() EditCapability {
 	cap := EditCapability{}
 
-	if path := findCommand("yt-dlp"); path != "" {
+	cap.YtDlpPath = a.resolveYtdlpPath()
+	if cap.YtDlpPath != "" {
 		cap.YtDlpAvailable = true
-		cap.YtDlpPath = path
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, path, "--version").Output()
+		out, err := exec.CommandContext(ctx, cap.YtDlpPath, "--version").Output()
 		if err == nil {
 			cap.YtDlpVersion = strings.TrimSpace(string(out))
 		}
@@ -121,7 +132,10 @@ func computeEditCapability() EditCapability {
 	cap.Enabled = cap.YtDlpAvailable && cap.FfmpegAvailable && cap.Online
 
 	// Single-line reason for the disabled badge — most actionable
-	// problem first.
+	// problem first. yt-dlp now ships with the app so it's almost
+	// always available; the only way to see "yt-dlp not installed"
+	// is on a developer build where the embed placeholder hasn't
+	// been replaced AND PATH has no yt-dlp.
 	switch {
 	case !cap.YtDlpAvailable && !cap.FfmpegAvailable:
 		cap.Reason = "yt-dlp and ffmpeg not installed"
@@ -133,6 +147,45 @@ func computeEditCapability() EditCapability {
 		cap.Reason = "No internet connection"
 	}
 	return cap
+}
+
+// resolveYtdlpPath returns an absolute path to a yt-dlp executable.
+// Resolution order:
+//
+//  1. Embedded binary extracted into Videos/.bin/ — preferred because
+//     it travels with the USB stick (matches the "nothing on the
+//     host's home directory" promise).
+//  2. Embedded binary extracted into the OS user-cache dir — fallback
+//     when the library is read-only or hasn't loaded yet. Yes, this
+//     does write to the host's home; it's the lesser evil vs. a
+//     misleading "yt-dlp not installed" error on an end-user release
+//     that has yt-dlp embedded right there.
+//  3. PATH lookup — for developer builds where the embed is the
+//     in-repo placeholder, or as a final fallback.
+//
+// Returns "" only if all three options fail.
+func (a *App) resolveYtdlpPath() string {
+	if bundled.HasEmbeddedYtdlp() {
+		// Try Videos/.bin/ first.
+		a.mu.RLock()
+		dir := a.videosDir
+		a.mu.RUnlock()
+		if dir != "" {
+			if path, err := bundled.ExtractYtdlp(filepath.Join(dir, ".bin")); err == nil {
+				return path
+			}
+		}
+		// Fall back to user cache dir (e.g. ~/Library/Caches/YTDisc on
+		// macOS, %LOCALAPPDATA%\YTDisc on Windows, ~/.cache/YTDisc on
+		// Linux). Less portable but at least the embedded yt-dlp is
+		// usable when the library directory is missing or read-only.
+		if cache, err := os.UserCacheDir(); err == nil {
+			if path, err := bundled.ExtractYtdlp(filepath.Join(cache, "YTDisc", "bin")); err == nil {
+				return path
+			}
+		}
+	}
+	return findCommand("yt-dlp")
 }
 
 // findCommand looks up an executable by name. Tries PATH first, then
