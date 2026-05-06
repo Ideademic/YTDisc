@@ -75,24 +75,16 @@ Just Works — no installer, no system files written outside the drive.
 You _can_ also use it locally on an internal SSD if you want — the
 app doesn't care. The portable design just means it doesn't have to.
 
-## Optional: ffmpeg for editing
+## Editing — fully self-contained (v1.1.0+)
 
-**yt-dlp ships inside the app as of v1.1.0** — no install needed.
-The first time you click "Edit" the bundled yt-dlp is extracted into
-`Videos/.bin/` so it travels with your USB stick.
+**No external tools required.** yt-dlp ships inside the app and
+self-extracts into `Videos/.bin/` on first use, so it travels with
+your USB stick. The video+audio stream merge that previously needed
+ffmpeg is now done by a pure-Go MP4 muxer baked into YTDisc itself.
 
-The library editing UI is gated on **ffmpeg** being installed and
-internet being available. ffmpeg is what yt-dlp uses to merge the
-separate video and audio streams YouTube serves at higher
-resolutions (≥1080p DASH formats). Install via Homebrew on Mac:
-
-```sh
-brew install ffmpeg
-```
-
-If ffmpeg is missing, the edit toggle in the status bar shows
-"ffmpeg not installed". Click it to re-check after installing —
-no app restart needed.
+Edit mode just needs an internet connection. If you're offline the
+edit toggle shows "No internet connection" — click it to re-check
+after reconnecting; no app restart needed.
 
 ## Building from source
 
@@ -129,11 +121,12 @@ Output is in `build/bin/`. For dev with hot reload, use `wails dev`.
 - `thumbnails.go` — embedded cover art + sidecar + YouTube fetch
 - `editor.go` — yt-dlp invocation + channel/folder/video CRUD +
   playlist + format-selector + capability detection
+- `muxer.go` — pure-Go MP4 stream-copy muxer (replaces ffmpeg)
 - `positions.go` — resume-playback bookmarks (`.state.json`)
 - `video_handler.go` — HTTP handler with Range support for `<video>`
   + symlink-aware path-traversal guard
-- `pathfix.go` — prepends Homebrew paths so Finder-launched apps can
-  find ffmpeg
+- `pathfix.go` — prepends Homebrew paths to PATH (legacy fallback
+  for the developer-build code path that looks up yt-dlp on PATH)
 - `bundled/` — `go:embed`'d yt-dlp standalone binaries per platform
 - `tools/fetch-ytdlp.sh` — downloads real yt-dlp into `bundled/`
   before `wails build`

@@ -21,7 +21,7 @@ Output lands in `build/bin/`. The frontend has no test runner and no Go tests ex
 
 The frontend "build" (`frontend/build.js`) just copies `index.html` + `src/` into `dist/`. Wails embeds `frontend/dist` via `//go:embed all:frontend/dist` in [main.go](main.go), so the dist folder must exist (even if empty) for `go build` to succeed standalone.
 
-For runtime editing features, the user needs `ffmpeg` on PATH (`brew install ffmpeg`). yt-dlp ships embedded inside the binary and self-extracts on first use — see the "Editor + capability gating" section.
+As of v1.1.0 there are NO runtime tool dependencies. yt-dlp ships embedded; the video+audio stream merge that previously needed ffmpeg is done by the pure-Go muxer in [muxer.go](muxer.go). See the "Editor + capability gating" section.
 
 ## Architecture
 
@@ -54,9 +54,11 @@ Channels with zero videos are still included in the scan so newly-created empty 
 Cache key is `sha1(absVideoPath)`. Cached files live in `Videos/.thumbs/<sha1>.jpg`. If that directory isn't writable (read-only USB), we fall back to an in-memory map (`App.memThumbs`). Any rename (channel or video) must call `migrateThumbCache` because the cache is keyed on the absolute path.
 
 ### Editor + capability gating
-[editor.go](editor.go) exposes channel/folder/video CRUD plus `AddVideos` (yt-dlp invocation). The "edit mode" toggle in the UI is gated on `EditCapability.Enabled`, which requires yt-dlp + ffmpeg + internet. Capability is cached for 8s and re-checked when the user clicks the badge (`RefreshEditCapability`).
+[editor.go](editor.go) exposes channel/folder/video CRUD plus `AddVideos` (yt-dlp invocation). The "edit mode" toggle in the UI is gated on `EditCapability.Enabled`, which requires yt-dlp + internet. Capability is cached for 8s and re-checked when the user clicks the badge (`RefreshEditCapability`).
 
-**yt-dlp ships embedded.** [bundled/](bundled/) `go:embed`s a per-platform yt-dlp standalone binary (PyInstaller bundle, ~25 MB) and `App.resolveYtdlpPath` extracts it into `Videos/.bin/yt-dlp[.exe]` on first use, atomically (tmp + rename, size-equality skip-rewrite). The repo only commits 1-byte placeholders; `tools/fetch-ytdlp.sh` populates the real binaries before `wails build`, both locally and in the GitHub Actions release workflow. `bundled.HasEmbeddedYtdlp()` returns true only when the embed is `>= 1 MB`, so developer builds without the fetch step transparently fall back to PATH-based discovery (`findCommand`). ffmpeg discovery still uses PATH only — embedding ffmpeg is planned for a future release once the mp4ff-based muxer lands.
+**yt-dlp ships embedded.** [bundled/](bundled/) `go:embed`s a per-platform yt-dlp standalone binary (PyInstaller bundle, ~25 MB) and `App.resolveYtdlpPath` extracts it into `Videos/.bin/yt-dlp[.exe]` on first use, atomically (per-PID tmp + rename, size-equality skip-rewrite). On macOS the post-extract step strips `com.apple.quarantine` and applies an ad-hoc codesign so Gatekeeper doesn't kill the spawned process. The repo only commits 1-byte placeholders; `tools/fetch-ytdlp.sh` populates the real binaries before `wails build`, both locally and in the GitHub Actions release workflow. `bundled.HasEmbeddedYtdlp()` returns true only when the embed is `>= 1 MB`, so developer builds without the fetch step transparently fall back to PATH-based discovery (`findCommand`). If extraction into `Videos/.bin/` fails (read-only USB, library not loaded), the resolver tries `os.UserCacheDir()/YTDisc/bin` next, then PATH.
+
+**ffmpeg is no longer required.** [muxer.go](muxer.go) is a pure-Go MP4 stream-copy muxer that combines the separate video-only `Title.f137.mp4` and audio-only `Title.f140.m4a` files yt-dlp leaves on disk into a single `Title.mp4`. It uses `mp4ff`'s box-tree representation: parses both inputs lazily (no full-file load), rewrites each track's `stco`/`co64` chunk-offset table to point at the new merged-file positions, then writes `[ftyp][mdat[video samples][audio samples]][moov]` with sample data stream-copied directly from the source files via `io.CopyN`. yt-dlp is invoked WITHOUT `--ffmpeg-location` so its own merger fails silently, leaving the orphan pair for `mergeOrphanStreams` to pick up — that path is now the only post-download merge step.
 
 Folder operations:
 - `CreateFolder` / `RenameFolder` / `DeleteFolder` — straightforward; `RenameFolder` snapshots the old absolute paths before `os.Rename` so cache migration can run after.

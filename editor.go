@@ -25,19 +25,24 @@ import (
 
 // EditCapability reports whether the user can use the library editing
 // features (add/rename/delete videos and channels). Editing requires
-// both yt-dlp installed and an internet connection — the latter so
-// downloads aren't tried offline only to fail noisily.
+// yt-dlp (which ships embedded) and an internet connection — the
+// latter so downloads aren't tried offline only to fail noisily.
 //
 // Rename/delete by themselves don't require yt-dlp or internet, but
 // for UX simplicity we gate the entire edit-mode toggle on both. The
-// frontend can choose to allow rename/delete even when yt-dlp is
-// missing if it wants — the backend doesn't enforce that.
+// frontend can choose to allow rename/delete even when offline if it
+// wants — the backend doesn't enforce that.
+//
+// As of v1.1.0 ffmpeg is no longer required: yt-dlp's separate
+// video+audio streams are muxed by the pure-Go MP4 muxer in
+// muxer.go. The Ffmpeg* fields are kept in the JSON DTO for
+// frontend compatibility but always report false / empty.
 type EditCapability struct {
 	Enabled         bool   `json:"enabled"`
 	YtDlpAvailable  bool   `json:"ytDlpAvailable"`
 	YtDlpVersion    string `json:"ytDlpVersion,omitempty"`
 	YtDlpPath       string `json:"ytDlpPath,omitempty"`
-	FfmpegAvailable bool   `json:"ffmpegAvailable"`
+	FfmpegAvailable bool   `json:"ffmpegAvailable"` // always false now; retained for DTO stability
 	FfmpegPath      string `json:"ffmpegPath,omitempty"`
 	Online          bool   `json:"online"`
 	Reason          string `json:"reason,omitempty"`
@@ -94,15 +99,15 @@ func (a *App) RefreshEditCapability() EditCapability {
 	return a.GetEditCapability()
 }
 
-// computeEditCapability resolves yt-dlp and ffmpeg paths and probes
-// the network. yt-dlp is preferred-resolved from the binary embedded
-// in this app (`bundled.Ytdlp`, extracted into Videos/.bin/) and
-// falls back to a PATH lookup when there's no embedded binary —
-// which happens on developer builds that haven't run
-// `tools/fetch-ytdlp.sh`. Released binaries always have an embedded
-// yt-dlp, so end users see "edit mode" enabled without ever having
-// to install yt-dlp themselves. ffmpeg is still resolved from PATH
-// only — embedding ffmpeg is planned for a later release.
+// computeEditCapability resolves yt-dlp and probes the network.
+// yt-dlp is preferred-resolved from the binary embedded in this app
+// (`bundled.Ytdlp`, extracted into Videos/.bin/) and falls back to a
+// PATH lookup when there's no embedded binary — which happens on
+// developer builds that haven't run `tools/fetch-ytdlp.sh`. Released
+// binaries always have an embedded yt-dlp, so end users see "edit
+// mode" enabled without ever having to install yt-dlp themselves.
+// ffmpeg is no longer probed: separate video+audio streams from
+// yt-dlp are muxed by the pure-Go muxer in muxer.go.
 func (a *App) computeEditCapability() EditCapability {
 	cap := EditCapability{}
 
@@ -117,19 +122,8 @@ func (a *App) computeEditCapability() EditCapability {
 		}
 	}
 
-	// ffmpeg is needed by yt-dlp for --merge-output-format mp4 when
-	// YouTube serves separate video+audio streams (typical for >720p
-	// DASH formats). Even when yt-dlp itself is on PATH, we've seen
-	// its postprocessor fail to find ffmpeg through the inherited
-	// environment, so we look for ffmpeg ourselves and pass it via
-	// --ffmpeg-location to the merger.
-	if path := findCommand("ffmpeg"); path != "" {
-		cap.FfmpegAvailable = true
-		cap.FfmpegPath = path
-	}
-
 	cap.Online = checkOnline()
-	cap.Enabled = cap.YtDlpAvailable && cap.FfmpegAvailable && cap.Online
+	cap.Enabled = cap.YtDlpAvailable && cap.Online
 
 	// Single-line reason for the disabled badge — most actionable
 	// problem first. yt-dlp now ships with the app so it's almost
@@ -137,12 +131,8 @@ func (a *App) computeEditCapability() EditCapability {
 	// is on a developer build where the embed placeholder hasn't
 	// been replaced AND PATH has no yt-dlp.
 	switch {
-	case !cap.YtDlpAvailable && !cap.FfmpegAvailable:
-		cap.Reason = "yt-dlp and ffmpeg not installed"
 	case !cap.YtDlpAvailable:
 		cap.Reason = "yt-dlp not installed"
-	case !cap.FfmpegAvailable:
-		cap.Reason = "ffmpeg not installed"
 	case !cap.Online:
 		cap.Reason = "No internet connection"
 	}
@@ -732,7 +722,7 @@ func (a *App) AddVideos(channelName, destFolder string, urls []string, quality s
 			})
 		}
 
-		if err := runYtdlp(ctx, cap.YtDlpPath, cap.FfmpegPath, downloadDir, url, quality, isPlaylist); err != nil {
+		if err := runYtdlp(ctx, cap.YtDlpPath, downloadDir, url, quality, isPlaylist); err != nil {
 			runtime.EventsEmit(ctx, "ytdlp-progress", map[string]any{
 				"current": i + 1,
 				"total":   total,
@@ -744,20 +734,18 @@ func (a *App) AddVideos(channelName, destFolder string, urls []string, quality s
 			return err
 		}
 
-		// yt-dlp's merger occasionally leaves the per-stream temp
-		// files (Title.f137.mp4 + Title.f140.m4a) instead of a single
-		// merged Title.mp4 — this happens silently on macOS Homebrew
-		// installs even with --ffmpeg-location set. Merge ourselves
-		// using ffmpeg directly to recover.
-		if cap.FfmpegPath != "" {
-			if err := mergeOrphanStreams(ctx, cap.FfmpegPath, downloadDir); err != nil {
-				runtime.EventsEmit(ctx, "ytdlp-progress", map[string]any{
-					"phase": "log",
-					"url":   url,
-					"line":  fmt.Sprintf("[ytdisc] post-merge warning: %v", err),
-				})
-				// Don't fail — leave streams in place, user can retry.
-			}
+		// yt-dlp wanted to merge separate video+audio streams via
+		// ffmpeg but we don't ship ffmpeg, so the per-stream temp
+		// files (Title.f137.mp4 + Title.f140.m4a) are still on disk.
+		// Mux them into a single Title.mp4 ourselves with the pure-
+		// Go muxer in muxer.go.
+		if err := mergeOrphanStreams(ctx, downloadDir); err != nil {
+			runtime.EventsEmit(ctx, "ytdlp-progress", map[string]any{
+				"phase": "log",
+				"url":   url,
+				"line":  fmt.Sprintf("[ytdisc] mux warning: %v", err),
+			})
+			// Don't fail — leave streams in place, user can retry.
 		}
 
 		runtime.EventsEmit(ctx, "ytdlp-progress", map[string]any{
@@ -874,11 +862,14 @@ func uniqueFolderName(chDir, base string) (string, error) {
 // playlist is true, --no-playlist is omitted so yt-dlp downloads
 // every entry in the playlist.
 //
-// ffmpeg is the absolute path to the ffmpeg binary; we pass its
-// containing directory to yt-dlp via --ffmpeg-location so yt-dlp can
-// find ffprobe alongside it (the ThumbnailsConvertor postprocessor
-// needs both).
-func runYtdlp(ctx context.Context, ytdlp, ffmpeg, outDir, url, quality string, playlist bool) error {
+// We deliberately do NOT pass --ffmpeg-location: yt-dlp's internal
+// merger fails when it can't find ffmpeg, leaving the per-stream
+// `Title.f137.mp4` + `Title.f140.m4a` files on disk, which our own
+// pure-Go muxer (mergeOrphanStreams → muxAVtoMP4) picks up. yt-dlp
+// is otherwise self-contained — no other postprocessor in our
+// invocation needs ffmpeg (we use --write-thumbnail to keep
+// thumbnails as sidecars rather than embedding them).
+func runYtdlp(ctx context.Context, ytdlp, outDir, url, quality string, playlist bool) error {
 	outTemplate := filepath.Join(outDir, "%(title)s.%(ext)s")
 	if playlist {
 		// Add a numeric prefix to the filename so playlist videos sort
@@ -898,9 +889,8 @@ func runYtdlp(ctx context.Context, ytdlp, ffmpeg, outDir, url, quality string, p
 		// Write the thumbnail as a sidecar file (Title.webp or .jpg)
 		// rather than embedding it. Our scanner already discovers
 		// sidecar images alongside videos, so the UX is identical —
-		// but we sidestep yt-dlp's ThumbnailsConvertor postprocessor,
-		// which doesn't reliably honor --ffmpeg-location on macOS
-		// Homebrew installs (yt-dlp issue #8680, closed as not planned).
+		// and embedding would require ffmpeg via the
+		// ThumbnailsConvertor postprocessor.
 		"--write-thumbnail",
 		"--merge-output-format", "mp4",
 		"--newline",  // emits one line per progress update (vs \r-overwrite)
@@ -914,13 +904,6 @@ func runYtdlp(ctx context.Context, ytdlp, ffmpeg, outDir, url, quality string, p
 		args = append(args, "--no-playlist")
 	} else {
 		args = append(args, "--yes-playlist")
-	}
-	if ffmpeg != "" {
-		// Still pass --ffmpeg-location for the merger postprocessor,
-		// which yt-dlp invokes when it picks separate video+audio
-		// streams (most YouTube DASH formats). Pass the directory so
-		// yt-dlp finds ffprobe alongside ffmpeg.
-		args = append(args, "--ffmpeg-location", filepath.Dir(ffmpeg))
 	}
 	// `--` is a hard end-of-flags marker — without it, a URL that
 	// starts with "-" (e.g. a malicious "--config-location=/tmp/x")
@@ -1032,16 +1015,16 @@ func indexLineBreak(b []byte) int {
 var orphanStreamRe = regexp.MustCompile(`^(.*)\.f\d+\.(mp4|m4a)$`)
 
 // mergeOrphanStreams scans chDir for unmerged yt-dlp stream files and
-// merges each video+audio pair into a single Title.mp4 using ffmpeg
-// directly. Stream-copy only (no transcode), so AVC + AAC pairs merge
-// in seconds. Source files are removed on success.
+// muxes each video+audio pair into a single Title.mp4 using the
+// pure-Go muxer in muxer.go. Stream-copy only (no transcode), so
+// AVC + AAC pairs mux in seconds. Source files are removed on
+// success.
 //
-// This is a defensive fallback — yt-dlp should be doing this merge
-// itself, but on macOS Homebrew installs we've observed it sometimes
-// skipping the merger silently even with --ffmpeg-location set,
-// leaving the user with two separate stream files and no playable
-// final output.
-func mergeOrphanStreams(ctx context.Context, ffmpeg, chDir string) error {
+// yt-dlp leaves these orphan pairs whenever it would normally merge
+// them via ffmpeg but can't find ffmpeg on PATH (which is now the
+// expected case — we deliberately don't ship ffmpeg). Doing the mux
+// here means edit mode works without any external dependencies.
+func mergeOrphanStreams(ctx context.Context, chDir string) error {
 	entries, err := os.ReadDir(chDir)
 	if err != nil {
 		return nil
@@ -1092,23 +1075,18 @@ func mergeOrphanStreams(ctx context.Context, ffmpeg, chDir string) error {
 		runtime.EventsEmit(ctx, "ytdlp-progress", map[string]any{
 			"phase": "log",
 			"url":   base,
-			"line":  fmt.Sprintf("[ytdisc] merging %s.{f*.mp4,f*.m4a} → %s.mp4", base, base),
+			"line":  fmt.Sprintf("[ytdisc] muxing %s.{f*.mp4,f*.m4a} → %s.mp4", base, base),
 		})
 
-		cmd := exec.CommandContext(ctx, ffmpeg,
-			"-y",                  // overwrite output if it exists
-			"-i", p.video,         // video stream
-			"-i", p.audio,         // audio stream
-			"-c", "copy",          // no transcode — stream copy only
-			"-movflags", "+faststart", // moov-atom-first MP4 layout
-			out,
-		)
-		if combined, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("ffmpeg merge of %q failed: %w\n%s",
-				base, err, string(combined))
+		// Pure-Go remux. Returns on first error so the user sees
+		// what went wrong (rather than silently leaving streams
+		// behind). The orphan files are kept on failure so the
+		// user can manually inspect/recover.
+		if err := muxAVtoMP4(p.video, p.audio, out); err != nil {
+			return fmt.Errorf("muxing %q failed: %w", base, err)
 		}
 
-		// Clean up the per-stream temp files now that the merge succeeded.
+		// Clean up the per-stream temp files now that the mux succeeded.
 		_ = os.Remove(p.video)
 		_ = os.Remove(p.audio)
 	}
