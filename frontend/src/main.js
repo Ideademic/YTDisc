@@ -1078,6 +1078,18 @@ async function refreshEditCapability(forceServerCheck) {
     ? await RefreshEditCapability()
     : await GetEditCapability();
   renderEditToggle();
+
+  // While yt-dlp is still extracting on first launch, the backend
+  // reports a "Preparing yt-dlp…" reason. Auto-poll once a second
+  // until that resolves so the user doesn't have to know to click
+  // the disabled badge — this is fully transparent on first run.
+  if (state.editCap?.reason === "Preparing yt-dlp…") {
+    clearTimeout(state.preparingPoll);
+    state.preparingPoll = setTimeout(() => refreshEditCapability(true), 1000);
+  } else if (state.preparingPoll) {
+    clearTimeout(state.preparingPoll);
+    state.preparingPoll = null;
+  }
 }
 
 function renderEditToggle() {

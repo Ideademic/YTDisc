@@ -11,6 +11,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"ytdisc/bundled"
 )
 
 // App is the singleton bound to the JS frontend. Wails turns its public
@@ -40,6 +43,17 @@ type App struct {
 	// delete) stacks goroutines that all walk the library in parallel
 	// and race to write the same .thumbs/<key>.jpg files.
 	thumbWalkTag uint64
+
+	// Path of the embedded yt-dlp once it's been extracted to disk.
+	// Set asynchronously by extractEmbeddedYtdlpAsync, which runs as
+	// a goroutine kicked off in startup. We don't extract on the
+	// hot path of GetEditCapability because writing 35 MB and
+	// codesigning a universal binary can easily take 5+ seconds —
+	// long enough that the first JS call into Go appeared to hang
+	// the UI at "Loading…". Atomic so we don't need a mutex on the
+	// read-heavy resolveYtdlpPath path.
+	ytdlpExtractedPath atomic.Pointer[string]
+	ytdlpExtracting    atomic.Bool
 }
 
 func NewApp() *App {
@@ -67,6 +81,13 @@ func (a *App) startup(ctx context.Context) {
 	// file) so do it synchronously here.
 	a.positions.setLibDir(dir)
 
+	// Extract the embedded yt-dlp on a background goroutine so the
+	// UI doesn't sit at "Loading…" while we write 35 MB to disk and
+	// run codesign on a universal binary. By the time the user
+	// clicks Edit, this should be done; if not, GetEditCapability
+	// reports a "Preparing yt-dlp…" state and the user can re-check.
+	go a.extractEmbeddedYtdlpAsync()
+
 	// Discover thumbnails (embedded MP4 cover art + sidecar files) for
 	// every video and pre-populate the cache. This runs in the
 	// background so the UI can render immediately.
@@ -75,6 +96,37 @@ func (a *App) startup(ctx context.Context) {
 	tag := a.thumbWalkTag
 	a.mu.Unlock()
 	go a.discoverThumbnails(tag)
+}
+
+// extractEmbeddedYtdlpAsync writes the embedded yt-dlp binary to disk
+// and (on macOS) codesigns it for Gatekeeper. Runs once at startup.
+// On read-only Videos/ or pre-library-load calls, falls back to
+// extracting into the OS user-cache dir. Sets a.ytdlpExtractedPath
+// on success; resolveYtdlpPath reads that atomically.
+func (a *App) extractEmbeddedYtdlpAsync() {
+	if !bundled.HasEmbeddedYtdlp() {
+		return
+	}
+	a.ytdlpExtracting.Store(true)
+	defer a.ytdlpExtracting.Store(false)
+
+	a.mu.RLock()
+	dir := a.videosDir
+	a.mu.RUnlock()
+
+	// Try Videos/.bin/ first — keeps yt-dlp on the USB stick.
+	if dir != "" {
+		if path, err := bundled.ExtractYtdlp(filepath.Join(dir, ".bin")); err == nil {
+			a.ytdlpExtractedPath.Store(&path)
+			return
+		}
+	}
+	// Fall back to user-cache dir for read-only USBs / library not loaded.
+	if cache, err := os.UserCacheDir(); err == nil {
+		if path, err := bundled.ExtractYtdlp(filepath.Join(cache, "YTDisc", "bin")); err == nil {
+			a.ytdlpExtractedPath.Store(&path)
+		}
+	}
 }
 
 // discoverThumbnails walks the library and tries, for each video, to

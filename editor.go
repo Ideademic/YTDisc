@@ -101,36 +101,37 @@ func (a *App) RefreshEditCapability() EditCapability {
 
 // computeEditCapability resolves yt-dlp and probes the network.
 // yt-dlp is preferred-resolved from the binary embedded in this app
-// (`bundled.Ytdlp`, extracted into Videos/.bin/) and falls back to a
-// PATH lookup when there's no embedded binary — which happens on
-// developer builds that haven't run `tools/fetch-ytdlp.sh`. Released
-// binaries always have an embedded yt-dlp, so end users see "edit
-// mode" enabled without ever having to install yt-dlp themselves.
-// ffmpeg is no longer probed: separate video+audio streams from
-// yt-dlp are muxed by the pure-Go muxer in muxer.go.
+// (extracted asynchronously by extractEmbeddedYtdlpAsync at startup)
+// and falls back to PATH lookup on developer builds without the
+// embed. ffmpeg is no longer probed: separate video+audio streams
+// from yt-dlp are muxed by the pure-Go muxer in muxer.go.
+//
+// **Fast path.** This method must return promptly because it's the
+// first JS call after app boot — historically a slow capability
+// check left the status bar stuck at "Loading…". Specifically: we
+// do NOT exec yt-dlp here (that's where the slowness came from —
+// PyInstaller standalone bundles take ~30 s to start up cold), and
+// we do NOT extract the embedded binary on this path; extraction
+// runs once on a startup goroutine. Until the goroutine finishes,
+// we report a transient "Preparing yt-dlp…" reason.
 func (a *App) computeEditCapability() EditCapability {
 	cap := EditCapability{}
 
 	cap.YtDlpPath = a.resolveYtdlpPath()
 	if cap.YtDlpPath != "" {
 		cap.YtDlpAvailable = true
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, cap.YtDlpPath, "--version").Output()
-		if err == nil {
-			cap.YtDlpVersion = strings.TrimSpace(string(out))
-		}
 	}
 
 	cap.Online = checkOnline()
 	cap.Enabled = cap.YtDlpAvailable && cap.Online
 
 	// Single-line reason for the disabled badge — most actionable
-	// problem first. yt-dlp now ships with the app so it's almost
-	// always available; the only way to see "yt-dlp not installed"
-	// is on a developer build where the embed placeholder hasn't
-	// been replaced AND PATH has no yt-dlp.
+	// problem first. The "Preparing yt-dlp…" branch only fires on
+	// the very first launch after install (or first launch after a
+	// version that bumps the embedded yt-dlp size).
 	switch {
+	case !cap.YtDlpAvailable && a.ytdlpExtracting.Load():
+		cap.Reason = "Preparing yt-dlp…"
 	case !cap.YtDlpAvailable:
 		cap.Reason = "yt-dlp not installed"
 	case !cap.Online:
@@ -139,41 +140,23 @@ func (a *App) computeEditCapability() EditCapability {
 	return cap
 }
 
-// resolveYtdlpPath returns an absolute path to a yt-dlp executable.
-// Resolution order:
-//
-//  1. Embedded binary extracted into Videos/.bin/ — preferred because
-//     it travels with the USB stick (matches the "nothing on the
-//     host's home directory" promise).
-//  2. Embedded binary extracted into the OS user-cache dir — fallback
-//     when the library is read-only or hasn't loaded yet. Yes, this
-//     does write to the host's home; it's the lesser evil vs. a
-//     misleading "yt-dlp not installed" error on an end-user release
-//     that has yt-dlp embedded right there.
-//  3. PATH lookup — for developer builds where the embed is the
-//     in-repo placeholder, or as a final fallback.
-//
-// Returns "" only if all three options fail.
+// resolveYtdlpPath returns an absolute path to a yt-dlp executable
+// without doing any blocking work. Just reads the atomic pointer set
+// by extractEmbeddedYtdlpAsync (which runs once on startup). If the
+// background extraction hasn't finished yet, returns "" (and the
+// capability check reports "Preparing yt-dlp…"). For developer
+// builds where the embed is the in-repo placeholder, the atomic
+// stays nil forever and we fall through to PATH-based discovery.
 func (a *App) resolveYtdlpPath() string {
+	if p := a.ytdlpExtractedPath.Load(); p != nil {
+		return *p
+	}
 	if bundled.HasEmbeddedYtdlp() {
-		// Try Videos/.bin/ first.
-		a.mu.RLock()
-		dir := a.videosDir
-		a.mu.RUnlock()
-		if dir != "" {
-			if path, err := bundled.ExtractYtdlp(filepath.Join(dir, ".bin")); err == nil {
-				return path
-			}
-		}
-		// Fall back to user cache dir (e.g. ~/Library/Caches/YTDisc on
-		// macOS, %LOCALAPPDATA%\YTDisc on Windows, ~/.cache/YTDisc on
-		// Linux). Less portable but at least the embedded yt-dlp is
-		// usable when the library directory is missing or read-only.
-		if cache, err := os.UserCacheDir(); err == nil {
-			if path, err := bundled.ExtractYtdlp(filepath.Join(cache, "YTDisc", "bin")); err == nil {
-				return path
-			}
-		}
+		// Real embed but extraction goroutine hasn't finished. Don't
+		// fall through to PATH — we're about to be ready, and if PATH
+		// finds an outdated system yt-dlp we'd silently use the wrong
+		// one.
+		return ""
 	}
 	return findCommand("yt-dlp")
 }
