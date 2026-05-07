@@ -91,8 +91,30 @@ html, body {
 .tab:last-child { border-right: none; }
 .tab:hover { background: var(--bg-hover); color: var(--fg); }
 .tab.active { background: var(--accent); color: white; }
-.tab-icon { font-size: 12px; }
 .tab-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- Icon sprite (Phosphor Bold) ------------------------------------- */
+/* Icons use stroke=currentColor in the SVG paths, so they inherit the
+   parent's text color automatically. Default is 1em — sized in line
+   with surrounding text — and we vertically center against the
+   baseline so they sit nicely next to text. Per-context overrides
+   below tweak the size in tighter spots. */
+.icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+  flex-shrink: 0;
+  pointer-events: none; /* clicks pass through to the parent button */
+}
+.tab .icon { width: 16px; height: 16px; vertical-align: -0.2em; }
+.add-btn .icon, .row-btn .icon { width: 14px; height: 14px; vertical-align: -0.1em; }
+.modal-close .icon { width: 16px; height: 16px; }
+.np-btn .icon { width: 16px; height: 16px; }
+.np-btn.np-play .icon { width: 20px; height: 20px; }
+.player-controls .icon { width: 22px; height: 22px; }
+.popout-close .icon { width: 22px; height: 22px; }
+.album-btn .icon { width: 14px; height: 14px; vertical-align: -0.15em; }
+.play-btn .icon { width: 16px; height: 16px; vertical-align: -0.15em; }
 
 /* ---- Tab content (3-column grid, mirrors #app's outer grid) ---------- */
 

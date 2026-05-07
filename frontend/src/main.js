@@ -256,7 +256,7 @@ async function renderAccountsTab() {
       </div>
       <div class="row-actions">
         ${acct.isEditor ? "" :
-          `<button class="row-btn" data-action="del" title="Delete account">🗑</button>`}
+          `<button class="row-btn" data-action="del" title="Delete account">${icon('trash')}</button>`}
       </div>`;
     setProfileGradient(li.querySelector(".profile-pic"), acct.colorA, acct.colorB, acct.angle);
     li.addEventListener("click", async (e) => {
@@ -367,8 +367,8 @@ function renderChannels(channels) {
         <span class="meta">${c.videoCount} video${c.videoCount === 1 ? "" : "s"} · ${formatDuration(c.totalSecs)}</span>
       </div>
       <div class="row-actions editor-only">
-        <button class="row-btn" data-action="rename-channel" title="Rename">✎</button>
-        <button class="row-btn" data-action="delete-channel" title="Delete">🗑</button>
+        <button class="row-btn" data-action="rename-channel" title="Rename">${icon('pencil-simple')}</button>
+        <button class="row-btn" data-action="delete-channel" title="Delete">${icon('trash')}</button>
       </div>`;
     li.addEventListener("click", (e) => {
       const action = e.target.closest("[data-action]")?.dataset?.action;
@@ -426,12 +426,12 @@ function renderItems(items) {
       li.dataset.folder = it.name;
       li.innerHTML = `
         <div class="row-main">
-          <span class="title">📁 ${escapeHTML(it.name)}</span>
+          <span class="title">${icon('folder')} ${escapeHTML(it.name)}</span>
           <span class="meta">${it.videoCount} video${it.videoCount === 1 ? "" : "s"} · ${formatDuration(it.totalSecs)}</span>
         </div>
         <div class="row-actions editor-only">
-          <button class="row-btn" data-action="rename-folder" title="Rename">✎</button>
-          <button class="row-btn" data-action="delete-folder" title="Empty / delete">🗑</button>
+          <button class="row-btn" data-action="rename-folder" title="Rename">${icon('pencil-simple')}</button>
+          <button class="row-btn" data-action="delete-folder" title="Empty / delete">${icon('trash')}</button>
         </div>`;
       li.addEventListener("click", (e) => {
         const a = e.target.closest("[data-action]")?.dataset?.action;
@@ -447,9 +447,9 @@ function renderItems(items) {
           <span class="meta">${formatDuration(it.totalSecs)}${it.width ? ` · ${it.width}×${it.height}` : ""}</span>
         </div>
         <div class="row-actions editor-only">
-          <button class="row-btn" data-action="move-video" title="Move">↪</button>
-          <button class="row-btn" data-action="rename-video" title="Rename">✎</button>
-          <button class="row-btn" data-action="delete-video" title="Delete">🗑</button>
+          <button class="row-btn" data-action="move-video" title="Move">${icon('arrow-elbow-up-right')}</button>
+          <button class="row-btn" data-action="rename-video" title="Rename">${icon('pencil-simple')}</button>
+          <button class="row-btn" data-action="delete-video" title="Delete">${icon('trash')}</button>
         </div>`;
       li.addEventListener("click", (e) => {
         const a = e.target.closest("[data-action]")?.dataset?.action;
@@ -491,13 +491,13 @@ async function renderDetail(v) {
       <div class="duration-tag">${formatDuration(v.totalSecs)}</div>
     </div>
     <h1 class="detail-title">${escapeHTML(v.name)}</h1>
-    <div class="detail-channel">${escapeHTML(v.channel)}${v.folder ? ` · 📁 ${escapeHTML(v.folder)}` : ""}</div>
+    <div class="detail-channel">${escapeHTML(v.channel)}${v.folder ? ` · ${icon('folder')} ${escapeHTML(v.folder)}` : ""}</div>
     <div class="detail-stats">
       ${v.width ? `<span>${v.width} × ${v.height}</span>` : ""}
       <span>${formatBytes(v.sizeBytes)}</span>
     </div>
     <div class="detail-actions">
-      <button class="play-btn" id="play-btn">${willResume ? `▶ Resume at ${formatDuration(resumeAt)}` : "▶ Play"}</button>
+      <button class="play-btn" id="play-btn">${icon('play')} ${willResume ? `Resume at ${formatDuration(resumeAt)}` : "Play"}</button>
       ${willResume ? `<button class="secondary-btn" id="play-from-start-btn">From start</button>` : ""}
       <button class="secondary-btn editor-only" id="set-thumb-btn">${has ? "Change thumbnail…" : "Set thumbnail…"}</button>
     </div>`;
@@ -657,7 +657,7 @@ function renderArtistList() {
     const expanded = state.expandedArtists.has(ar.name);
     li.innerHTML = `
       <div class="row-main artist-head">
-        <span class="title">${expanded ? "▾" : "▸"} ${escapeHTML(ar.name)}</span>
+        <span class="title">${icon(expanded ? 'caret-down' : 'caret-right')} ${escapeHTML(ar.name)}</span>
         <span class="meta">${ar.albumCount} album${ar.albumCount === 1 ? "" : "s"} · ${ar.songCount} song${ar.songCount === 1 ? "" : "s"}</span>
       </div>`;
     li.addEventListener("click", () => {
@@ -673,11 +673,11 @@ function renderArtistList() {
         if (state.selectedArtist === ar.name && state.selectedAlbum === al.name) ali.classList.add("selected");
         ali.innerHTML = `
           <div class="row-main">
-            <span class="title">💿 ${escapeHTML(al.name)}</span>
+            <span class="title">${icon('vinyl-record')} ${escapeHTML(al.name)}</span>
             <span class="meta">${al.songCount} song${al.songCount === 1 ? "" : "s"} · ${formatDuration(al.totalSecs)}</span>
           </div>
           <div class="row-actions editor-only">
-            <button class="row-btn" data-action="del-album" title="Delete album">🗑</button>
+            <button class="row-btn" data-action="del-album" title="Delete album">${icon('trash')}</button>
           </div>`;
         ali.addEventListener("click", (e) => {
           const a = e.target.closest("[data-action]")?.dataset?.action;
@@ -709,13 +709,13 @@ async function selectAlbum(artist, album) {
     li.dataset.relpath = s.relPath;
     li.innerHTML = `
       <div class="row-main">
-        <span class="title">${escapeHTML(s.title)}${s.hasMV ? ` <span class="mv-badge" title="Music video attached">🎬</span>` : ""}</span>
+        <span class="title">${escapeHTML(s.title)}${s.hasMV ? ` <span class="mv-badge" title="Music video attached">${icon('film-strip')}</span>` : ""}</span>
         <span class="meta">${formatDuration(s.durationSec)} · ${formatBytes(s.sizeBytes)}</span>
       </div>
       <div class="row-actions">
-        <button class="row-btn" data-action="play" title="Play">▶</button>
-        <button class="row-btn editor-only" data-action="add-mv" title="Attach music video">🎬+</button>
-        <button class="row-btn editor-only" data-action="del" title="Delete song">🗑</button>
+        <button class="row-btn" data-action="play" title="Play">${icon('play')}</button>
+        <button class="row-btn editor-only" data-action="add-mv" title="Attach music video">${icon('film-strip')}</button>
+        <button class="row-btn editor-only" data-action="del" title="Delete song">${icon('trash')}</button>
       </div>`;
     li.addEventListener("click", (e) => {
       const a = e.target.closest("[data-action]")?.dataset?.action;
@@ -818,12 +818,12 @@ function renderNowPlaying() {
       </div>
       <div class="np-progress"><div class="np-bar" id="np-bar-${t.id}"></div></div>
       <div class="np-controls">
-        <button class="np-btn" data-np="prev" title="Previous">⏮</button>
-        <button class="np-btn np-play" data-np="toggle" title="Play / pause">${state.music.paused ? "▶" : "⏸"}</button>
-        <button class="np-btn" data-np="next" title="Next">⏭</button>
-        <button class="np-btn" data-np="shuffle" title="Toggle shuffle"${state.music.shuffle ? ` class="active"` : ""}>🔀</button>
-        ${song.hasMV ? `<button class="np-btn" data-np="mv" title="Play music video">🎬</button>` : ""}
-        <button class="np-btn" data-np="popout" title="${state.music.popoutOpen ? "Close popout" : "Pop out"}">${state.music.popoutOpen ? "⤢" : "⛶"}</button>
+        <button class="np-btn" data-np="prev" title="Previous">${icon('skip-back')}</button>
+        <button class="np-btn np-play" data-np="toggle" title="Play / pause">${icon(state.music.paused ? 'play' : 'pause')}</button>
+        <button class="np-btn" data-np="next" title="Next">${icon('skip-forward')}</button>
+        <button class="np-btn${state.music.shuffle ? ' active' : ''}" data-np="shuffle" title="Toggle shuffle">${icon('shuffle')}</button>
+        ${song.hasMV ? `<button class="np-btn" data-np="mv" title="Play music video">${icon('film-strip')}</button>` : ""}
+        <button class="np-btn" data-np="popout" title="${state.music.popoutOpen ? "Close popout" : "Pop out"}">${icon(state.music.popoutOpen ? 'corners-in' : 'arrow-square-out')}</button>
       </div>`;
     t.querySelectorAll("[data-np]").forEach((btn) => {
       btn.addEventListener("click", (e) => onPlayerControl(btn.dataset.np, e));
@@ -943,10 +943,12 @@ function openAddDownloadsModal(kind) {
     $("addvideo-quality-row").classList.add("hidden");
   } else {
     if (!state.selectedChannel) { alert("Select a channel first."); return; }
-    const target = state.currentFolder
-      ? `${state.selectedChannel} / 📁 ${state.currentFolder}`
-      : state.selectedChannel;
-    $("addvideo-modal-title").textContent = `Add videos to ${target}`;
+    if (state.currentFolder) {
+      $("addvideo-modal-title").innerHTML =
+        `Add videos to ${escapeHTML(state.selectedChannel)} / ${icon('folder')} ${escapeHTML(state.currentFolder)}`;
+    } else {
+      $("addvideo-modal-title").textContent = `Add videos to ${state.selectedChannel}`;
+    }
     $("addvideo-hint").textContent = "Paste YouTube URLs — playlists create a folder under the channel and download every entry.";
     $("addvideo-quality-row").classList.remove("hidden");
   }
@@ -1007,7 +1009,7 @@ function renderManifestList() {
            <span class="mi-title">${escapeHTML(entry.title)}</span>
            <div class="mi-progress"><div class="mi-bar"></div></div>
          </div>`;
-    li.innerHTML = `<div class="manifest-head">${entry.kind === "playlist" ? "📑" : "▶"} ${escapeHTML(entry.title)} <span class="muted">(${entry.items.length} item${entry.items.length === 1 ? "" : "s"})</span></div>${itemsHTML}`;
+    li.innerHTML = `<div class="manifest-head">${icon(entry.kind === "playlist" ? "folder" : "play")} ${escapeHTML(entry.title)} <span class="muted">(${entry.items.length} item${entry.items.length === 1 ? "" : "s"})</span></div>${itemsHTML}`;
     ul.appendChild(li);
   }
 }
@@ -1217,7 +1219,7 @@ async function openMoveVideo(v) {
   if (v.folder) {
     const li = document.createElement("li");
     li.className = "move-dest-row";
-    li.textContent = "↩ Channel root";
+    li.innerHTML = `${icon('arrow-left')} Channel root`;
     li.addEventListener("click", () => doMove(v, ""));
     $("move-dest-list").appendChild(li);
   }
@@ -1225,7 +1227,7 @@ async function openMoveVideo(v) {
     if (f === v.folder) continue;
     const li = document.createElement("li");
     li.className = "move-dest-row";
-    li.textContent = `📁 ${f}`;
+    li.innerHTML = `${icon('folder')} ${escapeHTML(f)}`;
     li.addEventListener("click", () => doMove(v, f));
     $("move-dest-list").appendChild(li);
   }
@@ -1408,6 +1410,15 @@ function escapeHTML(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 function encodePath(relPath) { return relPath.split("/").map(encodeURIComponent).join("/"); }
+
+// icon renders a Phosphor Bold SVG by sprite ID. The sprite lives at
+// frontend/src/icons.svg (run tools/fetch-icons.sh to regenerate);
+// the Wails asset server serves it from src/icons.svg. CSS sets
+// `fill: currentColor` so theming via the parent's text color just
+// works.
+function icon(name) {
+  return `<svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-${name}"/></svg>`;
+}
 
 // Global keyboard
 document.addEventListener("keydown", (e) => {

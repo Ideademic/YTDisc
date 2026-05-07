@@ -13,15 +13,15 @@
            "chip" on the right showing whose session this is. -->
       <nav class="tabs">
         <button class="tab" data-tab="accounts" aria-label="Accounts">
-          <span class="tab-icon">👤</span>
+          <svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-user-circle"/></svg>
           <span class="tab-label">Accounts</span>
         </button>
         <button class="tab" data-tab="videos" aria-label="Videos">
-          <span class="tab-icon">▶</span>
+          <svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-monitor-play"/></svg>
           <span class="tab-label">Videos</span>
         </button>
         <button class="tab" data-tab="music" aria-label="Music">
-          <span class="tab-icon">♪</span>
+          <svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-music-notes"/></svg>
           <span class="tab-label">Music</span>
         </button>
       </nav>
@@ -40,7 +40,7 @@
                 id="add-channel-btn"
                 title="New channel"
                 aria-label="Add channel"
-              >+</button>
+              <svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-plus"/></svg></button>
             </span>
           </header>
           <ul id="channel-list" class="list"></ul>
@@ -51,8 +51,8 @@
           <header class="col-header">
             <span id="videos-header">Videos</span>
             <span class="col-header-actions">
-              <button class="add-btn editor-only" id="add-folder-btn" title="New folder">📁</button>
-              <button class="add-btn editor-only" id="add-video-btn" title="Add videos">+</button>
+              <button class="add-btn editor-only" id="add-folder-btn" title="New folder"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-folder-plus"/></svg></button>
+              <button class="add-btn editor-only" id="add-video-btn" title="Add videos"<svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-plus"/></svg></button>
             </span>
           </header>
           <ul id="video-list" class="list"></ul>
@@ -68,7 +68,7 @@
         <section id="subs-view" class="subs-view hidden">
           <header class="col-header">
             <span>Manage subscriptions</span>
-            <button class="modal-close" id="subs-close" aria-label="Done">✓</button>
+            <button class="modal-close" id="subs-close" aria-label="Done"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-check"/></svg></button>
           </header>
           <ul id="subs-list" class="list"></ul>
         </section>
@@ -80,7 +80,7 @@
         <section class="col col-channels" aria-label="Accounts">
           <header class="col-header">
             <span>Accounts</span>
-            <button class="add-btn" id="add-account-btn" title="Create account" aria-label="Create account">+</button>
+            <button class="add-btn" id="add-account-btn" title="Create account" aria-label="Create account"<svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-plus"/></svg></button>
           </header>
           <ul id="accounts-list" class="list"></ul>
         </section>
@@ -96,7 +96,7 @@
           <header class="col-header">
             <span>Artists</span>
             <span class="col-header-actions">
-              <button class="add-btn editor-only" id="add-music-btn" title="Add music" aria-label="Add music">+</button>
+              <button class="add-btn editor-only" id="add-music-btn" title="Add music" aria-label="Add music"<svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-plus"/></svg></button>
             </span>
           </header>
           <ul id="artist-list" class="list"></ul>
@@ -108,8 +108,8 @@
             <span id="songs-header">Songs</span>
           </header>
           <div class="album-controls hidden" id="album-controls">
-            <button class="album-btn" id="play-album-btn">▶ Play Album</button>
-            <button class="album-btn" id="shuffle-album-btn">🔀 Shuffle Album</button>
+            <button class="album-btn" id="play-album-btn"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-play"/></svg> Play Album</button>
+            <button class="album-btn" id="shuffle-album-btn"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-shuffle"/></svg> Shuffle Album</button>
           </div>
           <ul id="song-list" class="list"></ul>
         </section>
@@ -127,8 +127,8 @@
            videos). Same overlay as v1. -->
       <div id="player" class="player hidden">
         <div class="player-controls">
-          <button id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen (f)">⛶</button>
-          <button id="player-close" aria-label="Close" title="Close (esc)">×</button>
+          <button id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen (f)"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-corners-out"/></svg></button>
+          <button id="player-close" aria-label="Close" title="Close (esc)"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
         </div>
         <video id="player-video" controls></video>
         <div id="player-title"></div>
@@ -138,7 +138,7 @@
            view when the user clicks the expand button. Same close-X
            pattern as the video player overlay. -->
       <div id="music-popout" class="music-popout hidden">
-        <button id="music-popout-close" class="popout-close" aria-label="Close" title="Close (esc)">×</button>
+        <button id="music-popout-close" class="popout-close" aria-label="Close" title="Close (esc)"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
         <div id="music-popout-body"></div>
       </div>
 
@@ -217,7 +217,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2>New account</h2>
-            <button class="modal-close" id="add-account-close" aria-label="Close">×</button>
+            <button class="modal-close" id="add-account-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <label class="form-label">Username
@@ -253,7 +253,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2>Set thumbnail</h2>
-            <button class="modal-close" id="thumb-modal-close" aria-label="Close">×</button>
+            <button class="modal-close" id="thumb-modal-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint">Paste a YouTube link or video ID:</p>
@@ -279,7 +279,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2 id="channel-modal-title">New channel</h2>
-            <button class="modal-close" id="channel-modal-close" aria-label="Close">×</button>
+            <button class="modal-close" id="channel-modal-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint">Channel name (this becomes the folder name under Videos/).</p>
@@ -299,7 +299,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2>New folder in <span id="folder-modal-channel"></span></h2>
-            <button class="modal-close" id="folder-modal-close" aria-label="Close">×</button>
+            <button class="modal-close" id="folder-modal-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint">Folders group videos within a channel. They can't be nested inside other folders.</p>
@@ -319,7 +319,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2>Move <span id="move-modal-name"></span></h2>
-            <button class="modal-close" id="move-modal-close" aria-label="Close">×</button>
+            <button class="modal-close" id="move-modal-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint">Pick a destination inside <span id="move-modal-channel"></span>:</p>
@@ -336,7 +336,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2 id="rename-modal-title">Rename</h2>
-            <button class="modal-close" id="rename-modal-close" aria-label="Close">×</button>
+            <button class="modal-close" id="rename-modal-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint" id="rename-modal-hint"></p>
@@ -356,7 +356,7 @@
         <div class="modal-card">
           <header class="modal-header">
             <h2 id="confirm-title">Delete</h2>
-            <button class="modal-close" id="confirm-close" aria-label="Close">×</button>
+            <button class="modal-close" id="confirm-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p id="confirm-message"></p>
@@ -380,7 +380,7 @@
         <div class="modal-card modal-card-wide">
           <header class="modal-header">
             <h2 id="addvideo-modal-title">Add videos</h2>
-            <button class="modal-close" id="addvideo-close" aria-label="Close">×</button>
+            <button class="modal-close" id="addvideo-close" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="src/icons.svg#ph-x"/></svg></button>
           </header>
           <div class="modal-body">
             <p class="modal-hint" id="addvideo-hint">
