@@ -1,164 +1,391 @@
-// YTDisc — frontend logic.
+// YTDisc v2 — frontend logic.
 //
-// Backend bindings (Wails-generated): window.go.main.App.<Method>(...).
-// All async. Wails event API on window.runtime.
+// Backend bindings: window.go.main.App.<Method>(...). All async.
+// Wails event API on window.runtime.
 
-const {
-  Status,
-  Channels,
-  Items,
-  HasThumbnail,
-  FetchThumbnailFromYouTube,
-  ImportThumbnailFromFile,
-  ClearThumbnail,
-  GetEditCapability,
-  RefreshEditCapability,
-  CreateChannel,
-  RenameChannel,
-  DeleteChannel,
-  CreateFolder,
-  RenameFolder,
-  DeleteFolder,
-  EmptyFolder,
-  MoveVideo,
-  RenameVideo,
-  DeleteVideo,
-  AddVideos,
-  GetPosition,
-  SavePosition,
-  ClearPosition,
-} = window.go.main.App;
-
+const App = window.go.main.App;
 const { OpenFileDialog, EventsOn } = window.runtime;
 
 // ---- DOM refs ------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
 
-const channelList = $("channel-list");
-const videoList = $("video-list");
-const videosHeader = $("videos-header");
-const detail = $("detail");
-const statusStats = $("status-stats");
-const editToggle = $("edit-toggle");
+// ---- Global state --------------------------------------------------------
 
-const player = $("player");
-const playerVideo = $("player-video");
-const playerTitle = $("player-title");
-const playerClose = $("player-close");
-const playerFullscreen = $("player-fullscreen");
-
-// Modals
-const thumbModal = $("thumb-modal");
-const channelModal = $("channel-modal");
-const addvideoModal = $("addvideo-modal");
-const renameModal = $("rename-modal");
-const confirmModal = $("confirm-modal");
-const folderModal = $("folder-modal");
-const moveModal = $("move-modal");
-
-// ---- State ---------------------------------------------------------------
-
-let state = {
-  selectedChannel: null, // string
-  currentFolder: null,   // string|null — null = at channel root
-  selectedItem: null,    // {kind:"folder"|"video", ...}
-  itemsByKey: new Map(), // cache key = "channel/folder?", value = items[]
-  editing: false,
-  editCap: null,         // EditCapability snapshot
-  // Pending actions for shared modals.
-  renameTarget: null,    // {kind:"channel"|"folder"|"video", currentName, ...}
-  confirmAction: null,   // function — primary button
-  confirmAltAction: null,// function|null — secondary button
+const state = {
+  bootState: null,             // BootState DTO from Go
+  currentAccount: null,        // Account or null
+  accounts: [],                // full account list
+  tab: "videos",               // active tab name
+  // Videos tab
+  selectedChannel: null,
+  currentFolder: null,
+  selectedItem: null,
+  itemsByKey: new Map(),
+  manageSubsActive: false,
+  // Music tab
+  selectedArtist: null,
+  selectedAlbum: null,
+  artistList: [],              // ArtistInfo[]
+  expandedArtists: new Set(),  // artist names with their album list expanded
+  // Player (videos)
+  playerCurrent: null,
+  playerSaveTimer: null,
+  playerResuming: false,
+  // Music player
+  music: {
+    queue: [],                 // SongInfo[]
+    queueIndex: 0,
+    paused: true,
+    audio: null,               // single shared <audio>
+    popoutOpen: false,
+    shuffle: false,
+  },
+  // Misc
+  editCap: null,
+  preparingPoll: null,
+  renameTarget: null,
+  confirmAction: null,
+  confirmAltAction: null,
 };
 
-// State for the resume-playback feature. We track the currently playing
-// video so the periodic save / beforeunload handlers know what to write.
-const player_state = {
-  current: null,         // VideoInfo currently in the <video> element
-  saveTimer: null,
-  resuming: false,       // suppress save during the seek-to-saved-pos jump
-};
-const RESUME_HEAD_SECS = 45;  // skip resume if saved pos < this many seconds in
-const RESUME_TAIL_SECS = 20;  // skip resume if pos is within this many seconds of end
+const RESUME_HEAD_SECS = 45;
+const RESUME_TAIL_SECS = 20;
 const POSITION_SAVE_INTERVAL_MS = 5000;
 
 // ---- Init ----------------------------------------------------------------
 
 async function init() {
-  const status = await Status();
-  if (!status.ok) {
-    renderNoLibrary(status.message);
+  state.bootState = await App.GetBootState();
+  if (state.bootState.state === "no-library") {
+    renderNoLibrary(state.bootState.message);
     return;
   }
-  renderStats(status);
-
-  await refreshEditCapability(false);
-
-  const channels = await Channels();
-  renderChannels(channels);
-
-  if (channels.length > 0) {
-    selectChannel(channels[0].name);
+  if (state.bootState.state === "data-corrupt") {
+    // Don't auto-recover — the user might want to restore from a
+    // backup, and silently rewriting accounts.json with an empty
+    // file would destroy any recoverable account data.
+    renderNoLibrary(
+      `${state.bootState.message || "Drive data is corrupt."}\n` +
+      `Restore .data/accounts.json from a backup, or delete it to start fresh.`
+    );
+    return;
   }
-
-  // Re-check edit capability when the window regains focus — covers
-  // the "I just plugged in ethernet / installed yt-dlp" case without
-  // forcing the user to restart.
-  window.addEventListener("focus", () => refreshEditCapability(true));
-
-  // Listen for yt-dlp progress events from the backend.
-  EventsOn("ytdlp-progress", onYtdlpProgress);
-
-  // Last-ditch save when the window/app is going away. beforeunload
-  // fires for ⌘W on macOS Wails and for app quit when the window is
-  // the last one open. Force-quits and crashes obviously bypass this.
-  window.addEventListener("beforeunload", () => savePlayerPosition({ flushOnly: true }));
-  window.addEventListener("pagehide", () => savePlayerPosition({ flushOnly: true }));
+  if (state.bootState.state === "needs-upgrade") {
+    showModal($("upgrade-modal"));
+    return;
+  }
+  if (state.bootState.state === "needs-first-account") {
+    setupProfileForm("first-account");
+    showModal($("first-account-modal"));
+    setTimeout(() => $("first-account-name").focus(), 50);
+    return;
+  }
+  await postBoot();
 }
 
-// ---- Library rendering ---------------------------------------------------
+// postBoot is everything that runs once we're definitively in the
+// "ready" state (i.e. there's a current account). Called after init,
+// after AcceptDriveUpgrade, and after first-account creation. Wraps
+// the body in a try/catch so a transient render error doesn't leave
+// the user staring at a blank webview after CreateAccount succeeded
+// backend-side.
+let postBootRan = false;
+async function postBoot() {
+  try {
+    state.bootState = await App.GetBootState();
+    state.currentAccount = state.bootState.currentAccount;
+    state.accounts = await App.GetAccounts();
+    await refreshEditCapability(false);
+    if (!postBootRan) {
+      EventsOn("ytdlp-progress", onYtdlpProgress);
+      window.addEventListener("focus", () => refreshEditCapability(true));
+      window.addEventListener("beforeunload", () => savePlayerPosition({ flushOnly: true }));
+      window.addEventListener("pagehide", () => savePlayerPosition({ flushOnly: true }));
+      postBootRan = true;
+    }
+    setupChip();
+    setActiveTab(state.currentAccount?.lastTab || "videos");
+    document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
+    switchTab(state.tab);
+  } catch (err) {
+    console.error("postBoot failed:", err);
+    alert(`Couldn't finish startup: ${err}\n\nThe account was created, but the app needs to restart.`);
+  }
+}
 
 function renderNoLibrary(msg) {
-  $("app").innerHTML = `
-    <div class="message">
-      <div>
-        <p>${escapeHTML(msg || "No Videos/ folder found.")}</p>
-        <p>Place this app on a USB stick next to a folder named
-        <code>Videos/</code> with one subfolder per channel.</p>
+  $("app").innerHTML = `<div class="message"><div>
+    <p>${escapeHTML(msg || "No drive found.")}</p>
+    <p>Place this app on a USB stick next to a folder named
+    <code>Videos/</code> with one subfolder per channel, plus an
+    optional <code>Music/</code> folder for albums.</p>
+  </div></div>`;
+}
+
+// ---- Boot modals ---------------------------------------------------------
+
+$("upgrade-accept").addEventListener("click", async () => {
+  $("upgrade-accept").disabled = true;
+  $("upgrade-quit").disabled = true;
+  try {
+    await App.AcceptDriveUpgrade();
+    hideModal($("upgrade-modal"));
+    setupProfileForm("first-account");
+    showModal($("first-account-modal"));
+    setTimeout(() => $("first-account-name").focus(), 50);
+  } catch (err) {
+    alert(`Upgrade failed: ${String(err)}`);
+    $("upgrade-accept").disabled = false;
+    $("upgrade-quit").disabled = false;
+  }
+});
+
+$("upgrade-quit").addEventListener("click", () => App.QuitApp());
+
+// First-account creation
+$("first-account-save").addEventListener("click", async () => {
+  await tryCreateAccount("first-account");
+});
+$("first-account-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("first-account-save").click(); }
+});
+
+async function tryCreateAccount(prefix) {
+  const name = $(prefix + "-name").value.trim();
+  const a = $(prefix + "-colorA").value;
+  const b = $(prefix + "-colorB").value;
+  const angle = parseInt($(prefix + "-angle").value, 10) || 0;
+  const status = $(prefix + "-status");
+  if (!name) {
+    setStatusEl(status, "Username can't be empty.", "error");
+    return;
+  }
+  setStatusEl(status, "Creating…", "info");
+  try {
+    await App.CreateAccount(name, a, b, angle);
+    if (prefix === "first-account") {
+      hideModal($("first-account-modal"));
+      await postBoot();
+    } else {
+      hideModal($("add-account-modal"));
+      state.accounts = await App.GetAccounts();
+      if (state.tab === "accounts") renderAccountsTab();
+    }
+  } catch (err) {
+    setStatusEl(status, String(err), "error");
+  }
+}
+
+// ---- Profile form (live conic-gradient preview) --------------------------
+
+function setupProfileForm(prefix) {
+  const a = $(prefix + "-colorA");
+  const b = $(prefix + "-colorB");
+  const ang = $(prefix + "-angle");
+  const out = $(prefix + "-angle-out");
+  const preview = $(prefix + "-preview");
+  const update = () => {
+    const av = a.value, bv = b.value, angle = ang.value;
+    out.textContent = `${angle}°`;
+    setProfileGradient(preview, av, bv, parseInt(angle, 10));
+  };
+  a.oninput = b.oninput = ang.oninput = update;
+  update();
+}
+
+function setProfileGradient(el, colorA, colorB, angle) {
+  // The conic gradient repeats the start color at the end so the
+  // 0°↔360° seam is hidden. Looks like a smooth ring.
+  el.style.background =
+    `conic-gradient(from ${angle}deg, ${colorA}, ${colorB}, ${colorA})`;
+}
+
+// ---- Tabs ----------------------------------------------------------------
+
+document.querySelectorAll(".tab[data-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+});
+
+function setActiveTab(name) {
+  state.tab = name;
+  document.body.dataset.tab = name;
+  for (const t of document.querySelectorAll(".tab[data-tab]")) {
+    t.classList.toggle("active", t.dataset.tab === name);
+  }
+  for (const c of document.querySelectorAll("[data-tab-content]")) {
+    c.classList.toggle("hidden", c.dataset.tabContent !== name);
+  }
+}
+
+async function switchTab(name) {
+  setActiveTab(name);
+  if (state.currentAccount && !state.currentAccount.isEditor) {
+    App.UpdateLastTab(name).catch(() => {});
+  }
+  if (name === "accounts") {
+    await renderAccountsTab();
+  } else if (name === "videos") {
+    await renderVideosTab();
+  } else if (name === "music") {
+    await renderMusicTab();
+  }
+}
+
+// ---- Account chip --------------------------------------------------------
+
+function setupChip() {
+  const acct = state.currentAccount;
+  if (!acct) return;
+  $("chip-username").textContent = acct.username;
+  setProfileGradient($("chip-profile-pic"), acct.colorA, acct.colorB, acct.angle);
+}
+
+$("current-account-chip").addEventListener("click", () => switchTab("accounts"));
+
+// ===========================================================================
+// ACCOUNTS TAB
+// ===========================================================================
+
+async function renderAccountsTab() {
+  state.accounts = await App.GetAccounts();
+  const list = $("accounts-list");
+  list.innerHTML = "";
+  for (const acct of state.accounts) {
+    const li = document.createElement("li");
+    li.className = "account-row";
+    if (state.currentAccount && acct.id === state.currentAccount.id) {
+      li.classList.add("selected");
+    }
+    li.innerHTML = `
+      <span class="profile-pic profile-pic-md"></span>
+      <div class="row-main">
+        <span class="title">${escapeHTML(acct.username)}</span>
+        <span class="meta">${acct.isEditor ? "Editor — can modify the library" : "Account"}</span>
       </div>
-    </div>`;
+      <div class="row-actions">
+        ${acct.isEditor ? "" :
+          `<button class="row-btn" data-action="del" title="Delete account">🗑</button>`}
+      </div>`;
+    setProfileGradient(li.querySelector(".profile-pic"), acct.colorA, acct.colorB, acct.angle);
+    li.addEventListener("click", async (e) => {
+      const action = e.target.closest("[data-action]")?.dataset?.action;
+      if (action === "del") {
+        e.stopPropagation();
+        if (!confirm(`Delete account "${acct.username}"? Their watch progress and playlists will be removed.`)) return;
+        try {
+          await App.DeleteAccount(acct.id);
+          state.accounts = await App.GetAccounts();
+          renderAccountsTab();
+        } catch (err) {
+          alert(String(err));
+        }
+        return;
+      }
+      // Click on a row → switch to that account.
+      try {
+        await App.SwitchAccount(acct.id);
+        state.currentAccount = (await App.GetCurrentAccount()) || null;
+        document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
+        setupChip();
+        await refreshEditCapability(false);
+        // Auto-leave the Accounts tab to whichever tab the new account
+        // was last on (or videos by default). For Editor we go to
+        // videos.
+        const dest = state.currentAccount?.isEditor
+          ? "videos"
+          : (state.currentAccount?.lastTab || "videos");
+        switchTab(dest);
+      } catch (err) {
+        alert(String(err));
+      }
+    });
+    list.appendChild(li);
+  }
+  // Stats panel
+  await renderStatsPanel();
+}
+
+async function renderStatsPanel() {
+  const status = await App.Status();
+  const panel = $("stats-panel");
+  if (!status.ok) {
+    panel.innerHTML = `<p class="muted">${escapeHTML(status.message || "")}</p>`;
+    return;
+  }
+  panel.innerHTML = `
+    <h2 class="stats-heading">Library</h2>
+    <div class="stats-grid">
+      <div class="stat-cell"><div class="stat-num">${status.channels}</div><div class="stat-label">channels</div></div>
+      <div class="stat-cell"><div class="stat-num">${status.videos}</div><div class="stat-label">videos</div></div>
+      <div class="stat-cell"><div class="stat-num">${formatDuration(status.totalSecs)}</div><div class="stat-label">video runtime</div></div>
+      <div class="stat-cell"><div class="stat-num">${formatBytes(status.totalBytes)}</div><div class="stat-label">video size</div></div>
+      <div class="stat-cell"><div class="stat-num">${status.artists}</div><div class="stat-label">artists</div></div>
+      <div class="stat-cell"><div class="stat-num">${status.albums}</div><div class="stat-label">albums</div></div>
+      <div class="stat-cell"><div class="stat-num">${status.songs}</div><div class="stat-label">songs</div></div>
+      <div class="stat-cell"><div class="stat-num">${formatDuration(status.musicSecs)}</div><div class="stat-label">music runtime</div></div>
+      <div class="stat-cell"><div class="stat-num">${formatBytes(status.musicBytes)}</div><div class="stat-label">music size</div></div>
+    </div>
+    <p class="muted small-print">Drive: <code>${escapeHTML(status.driveRoot)}</code></p>`;
+}
+
+$("add-account-btn").addEventListener("click", () => {
+  setupProfileForm("add-account");
+  $("add-account-name").value = "";
+  setStatusEl($("add-account-status"), "");
+  showModal($("add-account-modal"));
+  setTimeout(() => $("add-account-name").focus(), 50);
+});
+$("add-account-save").addEventListener("click", () => tryCreateAccount("add-account"));
+$("add-account-cancel").addEventListener("click", () => hideModal($("add-account-modal")));
+$("add-account-close").addEventListener("click", () => hideModal($("add-account-modal")));
+$("add-account-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("add-account-save").click(); }
+});
+
+// ===========================================================================
+// VIDEOS TAB
+// ===========================================================================
+
+async function renderVideosTab() {
+  state.manageSubsActive = false;
+  $("subs-view").classList.add("hidden");
+  const channels = await App.Channels();
+  renderChannels(channels);
+  if (channels.length > 0 && !state.selectedChannel) {
+    selectChannel(channels[0].name);
+  } else if (state.selectedChannel) {
+    selectChannel(state.selectedChannel);
+  } else {
+    $("video-list").innerHTML = "";
+    $("videos-header").textContent = "Videos";
+    $("detail").className = "detail-empty";
+    $("detail").innerHTML = "<p>Select a video</p>";
+  }
 }
 
 function renderChannels(channels) {
-  channelList.innerHTML = "";
+  const list = $("channel-list");
+  list.innerHTML = "";
   for (const c of channels) {
     const li = document.createElement("li");
     li.dataset.channel = c.name;
     li.innerHTML = `
       <div class="row-main">
         <span class="title">${escapeHTML(c.name)}</span>
-        <span class="meta">${c.videoCount} video${
-      c.videoCount === 1 ? "" : "s"
-    } · ${formatDuration(c.totalSecs)}</span>
+        <span class="meta">${c.videoCount} video${c.videoCount === 1 ? "" : "s"} · ${formatDuration(c.totalSecs)}</span>
       </div>
-      <div class="row-actions edit-only">
+      <div class="row-actions editor-only">
         <button class="row-btn" data-action="rename-channel" title="Rename">✎</button>
         <button class="row-btn" data-action="delete-channel" title="Delete">🗑</button>
       </div>`;
     li.addEventListener("click", (e) => {
       const action = e.target.closest("[data-action]")?.dataset?.action;
-      if (action === "rename-channel") {
-        e.stopPropagation();
-        openRenameChannel(c.name);
-      } else if (action === "delete-channel") {
-        e.stopPropagation();
-        confirmDeleteChannel(c.name, c.videoCount);
-      } else {
-        selectChannel(c.name);
-      }
+      if (action === "rename-channel") { e.stopPropagation(); openRenameChannel(c.name); }
+      else if (action === "delete-channel") { e.stopPropagation(); confirmDeleteChannel(c.name, c.videoCount); }
+      else { selectChannel(c.name); }
     });
-    channelList.appendChild(li);
+    list.appendChild(li);
   }
 }
 
@@ -166,56 +393,42 @@ async function selectChannel(name) {
   state.selectedChannel = name;
   state.currentFolder = null;
   state.selectedItem = null;
-  highlightSelection(channelList, "channel", name);
-  videosHeader.textContent = name;
-  detail.className = "detail-empty";
-  detail.innerHTML = "<p>Select a video</p>";
+  highlightSelection($("channel-list"), "channel", name);
+  $("videos-header").textContent = name;
+  $("detail").className = "detail-empty";
+  $("detail").innerHTML = "<p>Select a video</p>";
   await loadAndRenderItems();
 }
 
-// loadAndRenderItems (re)fetches the items for the currently selected
-// channel + folder and renders them in the videos column.
 async function loadAndRenderItems() {
   const ch = state.selectedChannel;
   if (!ch) return;
-  const key = itemsKey(ch, state.currentFolder);
+  const key = state.currentFolder ? `${ch}\0${state.currentFolder}` : ch;
   let items = state.itemsByKey.get(key);
   if (!items) {
-    items = await Items(ch, state.currentFolder || "");
+    items = await App.Items(ch, state.currentFolder || "");
     state.itemsByKey.set(key, items);
   }
-  videosHeader.textContent = state.currentFolder
-    ? `${ch} / ${state.currentFolder}`
-    : ch;
+  $("videos-header").textContent = state.currentFolder ? `${ch} / ${state.currentFolder}` : ch;
   renderItems(items);
 }
 
-function itemsKey(channel, folder) {
-  return folder ? `${channel}\0${folder}` : channel;
-}
-
 function renderItems(items) {
+  const videoList = $("video-list");
   videoList.innerHTML = "";
-
-  // When inside a folder, prepend a "← Back" row so the user can
-  // climb back out without losing the channel selection.
   if (state.currentFolder) {
     const back = document.createElement("li");
     back.className = "back-row";
-    back.innerHTML = `
-      <div class="row-main">
-        <span class="title">← Back to ${escapeHTML(state.selectedChannel)}</span>
-      </div>`;
+    back.innerHTML = `<div class="row-main"><span class="title">← Back to ${escapeHTML(state.selectedChannel)}</span></div>`;
     back.addEventListener("click", () => {
       state.currentFolder = null;
       state.selectedItem = null;
-      detail.className = "detail-empty";
-      detail.innerHTML = "<p>Select a video</p>";
+      $("detail").className = "detail-empty";
+      $("detail").innerHTML = "<p>Select a video</p>";
       loadAndRenderItems();
     });
     videoList.appendChild(back);
   }
-
   for (const it of items) {
     const li = document.createElement("li");
     if (it.kind === "folder") {
@@ -223,54 +436,36 @@ function renderItems(items) {
       li.innerHTML = `
         <div class="row-main">
           <span class="title">📁 ${escapeHTML(it.name)}</span>
-          <span class="meta">${it.videoCount} video${
-        it.videoCount === 1 ? "" : "s"
-      } · ${formatDuration(it.totalSecs)}</span>
+          <span class="meta">${it.videoCount} video${it.videoCount === 1 ? "" : "s"} · ${formatDuration(it.totalSecs)}</span>
         </div>
-        <div class="row-actions edit-only">
+        <div class="row-actions editor-only">
           <button class="row-btn" data-action="rename-folder" title="Rename">✎</button>
           <button class="row-btn" data-action="delete-folder" title="Empty / delete">🗑</button>
         </div>`;
       li.addEventListener("click", (e) => {
-        const action = e.target.closest("[data-action]")?.dataset?.action;
-        if (action === "rename-folder") {
-          e.stopPropagation();
-          openRenameFolder(it.name);
-        } else if (action === "delete-folder") {
-          e.stopPropagation();
-          confirmDeleteFolder(it.name, it.videoCount);
-        } else {
-          enterFolder(it.name);
-        }
+        const a = e.target.closest("[data-action]")?.dataset?.action;
+        if (a === "rename-folder") { e.stopPropagation(); openRenameFolder(it.name); }
+        else if (a === "delete-folder") { e.stopPropagation(); confirmDeleteFolder(it.name, it.videoCount); }
+        else { enterFolder(it.name); }
       });
     } else {
       li.dataset.relpath = it.relPath;
       li.innerHTML = `
         <div class="row-main">
           <span class="title">${escapeHTML(it.name)}</span>
-          <span class="meta">${formatDuration(it.totalSecs)}${
-        it.width ? ` · ${it.width}×${it.height}` : ""
-      }</span>
+          <span class="meta">${formatDuration(it.totalSecs)}${it.width ? ` · ${it.width}×${it.height}` : ""}</span>
         </div>
-        <div class="row-actions edit-only">
-          <button class="row-btn" data-action="move-video" title="Move to folder">↪</button>
+        <div class="row-actions editor-only">
+          <button class="row-btn" data-action="move-video" title="Move">↪</button>
           <button class="row-btn" data-action="rename-video" title="Rename">✎</button>
           <button class="row-btn" data-action="delete-video" title="Delete">🗑</button>
         </div>`;
       li.addEventListener("click", (e) => {
-        const action = e.target.closest("[data-action]")?.dataset?.action;
-        if (action === "move-video") {
-          e.stopPropagation();
-          openMoveVideo(it);
-        } else if (action === "rename-video") {
-          e.stopPropagation();
-          openRenameVideo(it);
-        } else if (action === "delete-video") {
-          e.stopPropagation();
-          confirmDeleteVideo(it);
-        } else {
-          selectVideo(it);
-        }
+        const a = e.target.closest("[data-action]")?.dataset?.action;
+        if (a === "move-video") { e.stopPropagation(); openMoveVideo(it); }
+        else if (a === "rename-video") { e.stopPropagation(); openRenameVideo(it); }
+        else if (a === "delete-video") { e.stopPropagation(); confirmDeleteVideo(it); }
+        else { selectVideo(it); }
       });
     }
     videoList.appendChild(li);
@@ -280,71 +475,99 @@ function renderItems(items) {
 function enterFolder(name) {
   state.currentFolder = name;
   state.selectedItem = null;
-  detail.className = "detail-empty";
-  detail.innerHTML = "<p>Select a video</p>";
+  $("detail").className = "detail-empty";
+  $("detail").innerHTML = "<p>Select a video</p>";
   loadAndRenderItems();
 }
 
 async function selectVideo(v) {
   state.selectedItem = v;
-  highlightSelection(videoList, "relpath", v.relPath);
+  highlightSelection($("video-list"), "relpath", v.relPath);
   await renderDetail(v);
 }
 
 async function renderDetail(v) {
-  const has = await HasThumbnail(v.relPath);
-  const thumbURL = has
-    ? `/thumb/${encodePath(v.relPath)}?t=${Date.now()}`
-    : null;
-
-  // Check for a saved resume position so the play button can hint it.
+  const has = await App.HasThumbnail(v.relPath);
+  const thumbURL = has ? `/thumb/${encodePath(v.relPath)}?t=${Date.now()}` : null;
   let resumeAt = 0;
-  try {
-    resumeAt = await GetPosition(v.relPath);
-  } catch (_) { /* ignore */ }
+  try { resumeAt = await App.GetPosition(v.relPath); } catch {}
   const willResume = shouldResumeAt(resumeAt, v.totalSecs);
-
+  const detail = $("detail");
   detail.className = "detail";
   detail.innerHTML = `
     <div class="detail-thumb">
-      ${
-        thumbURL
-          ? `<img src="${thumbURL}" alt="">`
-          : `<div class="placeholder">No thumbnail</div>`
-      }
+      ${thumbURL ? `<img src="${thumbURL}" alt="">` : `<div class="placeholder">No thumbnail</div>`}
       <div class="duration-tag">${formatDuration(v.totalSecs)}</div>
     </div>
     <h1 class="detail-title">${escapeHTML(v.name)}</h1>
-    <div class="detail-channel">${escapeHTML(v.channel)}${
-    v.folder ? ` · 📁 ${escapeHTML(v.folder)}` : ""
-  }</div>
+    <div class="detail-channel">${escapeHTML(v.channel)}${v.folder ? ` · 📁 ${escapeHTML(v.folder)}` : ""}</div>
     <div class="detail-stats">
       ${v.width ? `<span>${v.width} × ${v.height}</span>` : ""}
       <span>${formatBytes(v.sizeBytes)}</span>
     </div>
     <div class="detail-actions">
-      <button class="play-btn" id="play-btn">${
-        willResume ? `▶ Resume at ${formatDuration(resumeAt)}` : "▶ Play"
-      }</button>
-      ${
-        willResume
-          ? `<button class="secondary-btn" id="play-from-start-btn">From start</button>`
-          : ""
-      }
-      <button class="secondary-btn" id="set-thumb-btn">
-        ${has ? "Change thumbnail…" : "Set thumbnail…"}
-      </button>
+      <button class="play-btn" id="play-btn">${willResume ? `▶ Resume at ${formatDuration(resumeAt)}` : "▶ Play"}</button>
+      ${willResume ? `<button class="secondary-btn" id="play-from-start-btn">From start</button>` : ""}
+      <button class="secondary-btn editor-only" id="set-thumb-btn">${has ? "Change thumbnail…" : "Set thumbnail…"}</button>
     </div>`;
-
-  $("play-btn").addEventListener("click", () => play(v));
-  $("play-from-start-btn")?.addEventListener("click", () => play(v, { fromStart: true }));
-  $("set-thumb-btn").addEventListener("click", () => openThumbModal(v));
+  $("play-btn").addEventListener("click", () => playVideo(v));
+  $("play-from-start-btn")?.addEventListener("click", () => playVideo(v, { fromStart: true }));
+  $("set-thumb-btn")?.addEventListener("click", () => openThumbModal(v));
 }
 
-// ---- Player + fullscreen + resume ---------------------------------------
+// ---- Manage subscriptions ------------------------------------------------
 
-// shouldResumeAt encodes the product rule: resume only if the saved
-// position is past the first 45 seconds AND before the last 20 seconds.
+$("manage-subs-btn").addEventListener("click", openSubsView);
+$("subs-close").addEventListener("click", closeSubsView);
+
+async function openSubsView() {
+  state.manageSubsActive = true;
+  $("subs-view").classList.remove("hidden");
+  const all = await App.AllChannels();
+  const list = $("subs-list");
+  list.innerHTML = "";
+  if (all.length === 0) {
+    list.innerHTML = `<li class="empty-row">No channels exist yet${state.currentAccount?.isEditor ? " — add one with the + button when you exit." : "."}</li>`;
+    return;
+  }
+  for (const c of all) {
+    const li = document.createElement("li");
+    li.className = "subs-row";
+    li.innerHTML = `
+      <label class="subs-check">
+        <input type="checkbox" ${c.subscribed ? "checked" : ""} ${state.currentAccount?.isEditor ? "disabled" : ""} />
+        <span class="title">${escapeHTML(c.name)}</span>
+        <span class="meta">${c.videoCount} video${c.videoCount === 1 ? "" : "s"}</span>
+      </label>`;
+    const checkbox = li.querySelector("input");
+    checkbox.addEventListener("change", async (e) => {
+      try {
+        if (e.target.checked) await App.Subscribe(c.name);
+        else await App.Unsubscribe(c.name);
+        // Live-update the channel list under the subs view.
+        renderChannels(await App.Channels());
+      } catch (err) {
+        alert(String(err));
+        e.target.checked = !e.target.checked;
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+function closeSubsView() {
+  state.manageSubsActive = false;
+  $("subs-view").classList.add("hidden");
+}
+
+// ===========================================================================
+// VIDEO PLAYER (overlay)
+// ===========================================================================
+
+const player = $("player");
+const playerVideo = $("player-video");
+const playerTitle = $("player-title");
+
 function shouldResumeAt(pos, durationSec) {
   if (!pos || pos <= 0) return false;
   if (pos < RESUME_HEAD_SECS) return false;
@@ -352,608 +575,745 @@ function shouldResumeAt(pos, durationSec) {
   return true;
 }
 
-async function play(v, opts = {}) {
-  player_state.current = v;
-  player_state.resuming = false;
+async function playVideo(v, opts = {}) {
+  state.playerCurrent = v;
+  state.playerResuming = false;
   playerVideo.src = `/video/${encodePath(v.relPath)}`;
   playerTitle.textContent = `${v.channel} — ${v.name}`;
   player.classList.remove("hidden");
-
-  // Decide whether to resume. Skip the lookup entirely on "From start".
   let resumeAt = 0;
   if (!opts.fromStart) {
-    try {
-      resumeAt = await GetPosition(v.relPath);
-    } catch (_) { /* ignore */ }
+    try { resumeAt = await App.GetPosition(v.relPath); } catch {}
   }
   if (shouldResumeAt(resumeAt, v.totalSecs)) {
-    // Wait for metadata so currentTime= is honored. The "loadedmetadata"
-    // event fires reliably across browsers; "canplay" can be late.
-    player_state.resuming = true;
+    state.playerResuming = true;
     const seek = () => {
-      try {
-        playerVideo.currentTime = resumeAt;
-      } catch (_) { /* ignore */ }
-      // Tiny delay so the seek's own timeupdate doesn't immediately
-      // overwrite the saved position with the resume point itself.
-      setTimeout(() => { player_state.resuming = false; }, 200);
+      try { playerVideo.currentTime = resumeAt; } catch {}
+      setTimeout(() => { state.playerResuming = false; }, 200);
       playerVideo.removeEventListener("loadedmetadata", seek);
     };
     playerVideo.addEventListener("loadedmetadata", seek);
   }
-
   startPositionSaver();
   playerVideo.play().catch(() => {});
 }
 
 function closePlayer() {
-  // Persist where we were before we tear down the <video>.
   savePlayerPosition();
   stopPositionSaver();
-
-  // If we're currently fullscreen, exit first so we don't leave the
-  // user staring at a blank screen.
-  if (document.fullscreenElement) {
-    document.exitFullscreen?.();
-  }
+  if (document.fullscreenElement) document.exitFullscreen?.();
   player.classList.add("hidden");
   playerVideo.pause();
   playerVideo.removeAttribute("src");
   playerVideo.load();
-  // Refresh the detail panel so the play button reflects the new
-  // saved position immediately ("▶ Resume at …").
-  if (state.selectedItem && state.selectedItem.kind === "video") {
-    renderDetail(state.selectedItem);
-  }
-  player_state.current = null;
+  if (state.selectedItem && state.selectedItem.kind === "video") renderDetail(state.selectedItem);
+  state.playerCurrent = null;
 }
 
 function toggleFullscreen() {
-  if (document.fullscreenElement) {
-    document.exitFullscreen?.();
-    return;
-  }
-  if (playerVideo.requestFullscreen) {
-    playerVideo.requestFullscreen().catch(() => {});
-  } else if (playerVideo.webkitRequestFullscreen) {
-    playerVideo.webkitRequestFullscreen();
-  } else if (playerVideo.webkitEnterFullscreen) {
-    playerVideo.webkitEnterFullscreen();
-  }
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+  if (playerVideo.requestFullscreen) playerVideo.requestFullscreen().catch(() => {});
+  else if (playerVideo.webkitRequestFullscreen) playerVideo.webkitRequestFullscreen();
 }
 
-playerClose.addEventListener("click", closePlayer);
-playerFullscreen.addEventListener("click", toggleFullscreen);
-
-document.addEventListener("fullscreenchange", () => {
-  player.classList.toggle("is-fullscreen", !!document.fullscreenElement);
-});
-
-// When playback runs to completion, drop the saved position so the
-// next "▶ Play" doesn't try to resume to within the last 20 seconds.
+$("player-close").addEventListener("click", closePlayer);
+$("player-fullscreen").addEventListener("click", toggleFullscreen);
 playerVideo.addEventListener("ended", () => {
-  const v = player_state.current;
-  if (v) {
-    ClearPosition(v.relPath).catch(() => {});
-  }
+  if (state.playerCurrent) App.ClearPosition(state.playerCurrent.relPath).catch(() => {});
 });
-
 playerVideo.addEventListener("pause", () => savePlayerPosition());
-
-// ---- Position-save plumbing ---------------------------------------------
 
 function startPositionSaver() {
   stopPositionSaver();
-  player_state.saveTimer = setInterval(() => {
-    savePlayerPosition();
-  }, POSITION_SAVE_INTERVAL_MS);
+  state.playerSaveTimer = setInterval(savePlayerPosition, POSITION_SAVE_INTERVAL_MS);
 }
-
 function stopPositionSaver() {
-  if (player_state.saveTimer) {
-    clearInterval(player_state.saveTimer);
-    player_state.saveTimer = null;
-  }
+  if (state.playerSaveTimer) { clearInterval(state.playerSaveTimer); state.playerSaveTimer = null; }
 }
-
-// savePlayerPosition writes the current playhead to the backend. Skips
-// writing during the resume-seek itself (so we don't immediately
-// overwrite the saved position with the same value), and skips when
-// the playhead is essentially at zero or already at the end.
 function savePlayerPosition({ flushOnly = false } = {}) {
-  const v = player_state.current;
+  const v = state.playerCurrent;
   if (!v) return;
-  if (player_state.resuming && !flushOnly) return;
+  if (state.playerResuming && !flushOnly) return;
   const pos = playerVideo.currentTime;
-  if (!isFinite(pos) || pos <= 1) {
-    // Treat near-zero as "not started" — nothing useful to bookmark.
-    return;
-  }
-  // If we're within the last 20 s, treat that as "essentially done"
-  // and clear the bookmark so the next play starts fresh, matching
-  // the resume rule on the read side.
+  if (!isFinite(pos) || pos <= 1) return;
   if (v.totalSecs && pos > v.totalSecs - RESUME_TAIL_SECS) {
-    ClearPosition(v.relPath).catch(() => {});
+    App.ClearPosition(v.relPath).catch(() => {});
     return;
   }
-  SavePosition(v.relPath, pos).catch(() => {});
+  App.SavePosition(v.relPath, pos).catch(() => {});
 }
 
-// ---- Thumbnail modal -----------------------------------------------------
+// ===========================================================================
+// MUSIC TAB
+// ===========================================================================
 
-const thumbUrlInput = $("thumb-url-input");
-const thumbFetchBtn = $("thumb-fetch-btn");
-const thumbImportBtn = $("thumb-import-btn");
-const thumbClearBtn = $("thumb-clear-btn");
-const thumbModalStatus = $("thumb-modal-status");
-
-function openThumbModal(v) {
-  thumbUrlInput.value = "";
-  setStatusEl(thumbModalStatus, "");
-  showModal(thumbModal);
-  setTimeout(() => thumbUrlInput.focus(), 50);
+async function renderMusicTab() {
+  state.artistList = await App.MusicArtists();
+  renderArtistList();
+  renderNowPlaying();
 }
 
-$("thumb-modal-close").addEventListener("click", () => hideModal(thumbModal));
-bindBackdropClose(thumbModal);
-
-async function fetchFromYouTube() {
-  const v = currentVideo();
-  if (!v) return;
-  const input = thumbUrlInput.value.trim();
-  if (!input) {
-    setStatusEl(thumbModalStatus, "Paste a YouTube URL or video ID.", "error");
+function renderArtistList() {
+  const list = $("artist-list");
+  list.innerHTML = "";
+  if (state.artistList.length === 0) {
+    list.innerHTML = `<li class="empty-row">No music yet${state.currentAccount?.isEditor ? " — add some with the + button" : ""}.</li>`;
     return;
   }
-  setStatusEl(thumbModalStatus, "Fetching from YouTube…", "info");
-  thumbFetchBtn.disabled = true;
-  try {
-    await FetchThumbnailFromYouTube(v.relPath, input);
-    setStatusEl(thumbModalStatus, "Saved.", "ok");
-    await renderDetail(v);
-    setTimeout(() => hideModal(thumbModal), 600);
-  } catch (err) {
-    setStatusEl(thumbModalStatus, String(err), "error");
-  } finally {
-    thumbFetchBtn.disabled = false;
-  }
-}
-
-async function importFromFile() {
-  const v = currentVideo();
-  if (!v) return;
-  try {
-    const file = await OpenFileDialog({
-      Title: "Choose a thumbnail image",
-      Filters: [
-        {
-          DisplayName: "Images (*.jpg, *.jpeg, *.png, *.webp)",
-          Pattern: "*.jpg;*.jpeg;*.png;*.webp",
-        },
-      ],
+  for (const ar of state.artistList) {
+    const li = document.createElement("li");
+    li.className = "artist-row";
+    const expanded = state.expandedArtists.has(ar.name);
+    li.innerHTML = `
+      <div class="row-main artist-head">
+        <span class="title">${expanded ? "▾" : "▸"} ${escapeHTML(ar.name)}</span>
+        <span class="meta">${ar.albumCount} album${ar.albumCount === 1 ? "" : "s"} · ${ar.songCount} song${ar.songCount === 1 ? "" : "s"}</span>
+      </div>`;
+    li.addEventListener("click", () => {
+      if (state.expandedArtists.has(ar.name)) state.expandedArtists.delete(ar.name);
+      else state.expandedArtists.add(ar.name);
+      renderArtistList();
     });
-    if (!file) return;
-    setStatusEl(thumbModalStatus, "Importing…", "info");
-    await ImportThumbnailFromFile(v.relPath, file);
-    setStatusEl(thumbModalStatus, "Saved.", "ok");
-    await renderDetail(v);
-    setTimeout(() => hideModal(thumbModal), 600);
-  } catch (err) {
-    setStatusEl(thumbModalStatus, String(err), "error");
+    list.appendChild(li);
+    if (expanded) {
+      for (const al of ar.albums) {
+        const ali = document.createElement("li");
+        ali.className = "album-row";
+        if (state.selectedArtist === ar.name && state.selectedAlbum === al.name) ali.classList.add("selected");
+        ali.innerHTML = `
+          <div class="row-main">
+            <span class="title">💿 ${escapeHTML(al.name)}</span>
+            <span class="meta">${al.songCount} song${al.songCount === 1 ? "" : "s"} · ${formatDuration(al.totalSecs)}</span>
+          </div>
+          <div class="row-actions editor-only">
+            <button class="row-btn" data-action="del-album" title="Delete album">🗑</button>
+          </div>`;
+        ali.addEventListener("click", (e) => {
+          const a = e.target.closest("[data-action]")?.dataset?.action;
+          if (a === "del-album") {
+            e.stopPropagation();
+            if (!confirm(`Move album "${al.name}" to trash?`)) return;
+            App.DeleteAlbum(ar.name, al.name).then(() => renderMusicTab()).catch((err) => alert(String(err)));
+            return;
+          }
+          selectAlbum(ar.name, al.name);
+        });
+        list.appendChild(ali);
+      }
+    }
   }
 }
 
-async function clearThumbnail() {
-  const v = currentVideo();
-  if (!v) return;
-  try {
-    await ClearThumbnail(v.relPath);
-    await renderDetail(v);
-    hideModal(thumbModal);
-  } catch (err) {
-    setStatusEl(thumbModalStatus, String(err), "error");
+async function selectAlbum(artist, album) {
+  state.selectedArtist = artist;
+  state.selectedAlbum = album;
+  renderArtistList();
+  $("songs-header").textContent = `${artist} — ${album}`;
+  const songs = await App.AlbumSongs(artist, album);
+  const songList = $("song-list");
+  songList.innerHTML = "";
+  $("album-controls").classList.toggle("hidden", songs.length === 0);
+  for (const s of songs) {
+    const li = document.createElement("li");
+    li.dataset.relpath = s.relPath;
+    li.innerHTML = `
+      <div class="row-main">
+        <span class="title">${escapeHTML(s.title)}${s.hasMV ? ` <span class="mv-badge" title="Music video attached">🎬</span>` : ""}</span>
+        <span class="meta">${formatDuration(s.durationSec)} · ${formatBytes(s.sizeBytes)}</span>
+      </div>
+      <div class="row-actions">
+        <button class="row-btn" data-action="play" title="Play">▶</button>
+        <button class="row-btn editor-only" data-action="add-mv" title="Attach music video">🎬+</button>
+        <button class="row-btn editor-only" data-action="del" title="Delete song">🗑</button>
+      </div>`;
+    li.addEventListener("click", (e) => {
+      const a = e.target.closest("[data-action]")?.dataset?.action;
+      if (a === "play") { e.stopPropagation(); playSong(s, songs); }
+      else if (a === "add-mv") { e.stopPropagation(); openAttachMVModal(s); }
+      else if (a === "del") {
+        e.stopPropagation();
+        if (!confirm(`Move "${s.title}" to trash?`)) return;
+        App.DeleteSong(s.relPath).then(() => selectAlbum(artist, album)).catch((err) => alert(String(err)));
+      } else {
+        playSong(s, songs);
+      }
+    });
+    songList.appendChild(li);
+  }
+  // Wire album buttons.
+  $("play-album-btn").onclick = () => playQueue(songs, 0, false);
+  $("shuffle-album-btn").onclick = () => playQueue(songs, 0, true);
+}
+
+// ---- Music player --------------------------------------------------------
+
+function ensureAudioElement() {
+  if (state.music.audio) return state.music.audio;
+  const audio = new Audio();
+  audio.preload = "metadata";
+  audio.addEventListener("ended", onSongEnded);
+  audio.addEventListener("play", () => { state.music.paused = false; renderNowPlaying(); });
+  audio.addEventListener("pause", () => { state.music.paused = true; renderNowPlaying(); });
+  audio.addEventListener("timeupdate", renderNowPlayingProgress);
+  state.music.audio = audio;
+  return audio;
+}
+
+function playSong(song, contextSongs = null) {
+  // If launched from an album, use that album's order as the queue.
+  // If just a single-song play, queue is [song].
+  const queue = contextSongs && contextSongs.length > 0 ? contextSongs : [song];
+  const idx = queue.findIndex((s) => s.relPath === song.relPath);
+  playQueue(queue, idx >= 0 ? idx : 0, false);
+}
+
+function playQueue(songs, startIndex, shuffle) {
+  if (!songs || songs.length === 0) return;
+  let queue = songs.slice();
+  if (shuffle) {
+    queue = shuffleArray(queue);
+  }
+  state.music.queue = queue;
+  state.music.queueIndex = shuffle ? 0 : startIndex;
+  state.music.shuffle = shuffle;
+  loadAndPlayCurrent();
+}
+
+function loadAndPlayCurrent() {
+  const audio = ensureAudioElement();
+  const song = state.music.queue[state.music.queueIndex];
+  if (!song) return;
+  audio.src = `/audio/${encodePath(song.relPath)}`;
+  audio.play().catch(() => {});
+  renderNowPlaying();
+}
+
+function onSongEnded() {
+  if (state.music.queueIndex < state.music.queue.length - 1) {
+    state.music.queueIndex++;
+    loadAndPlayCurrent();
+  } else {
+    state.music.paused = true;
+    renderNowPlaying();
   }
 }
 
-function currentVideo() {
-  const it = state.selectedItem;
-  return it && it.kind === "video" ? it : null;
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
-thumbFetchBtn.addEventListener("click", fetchFromYouTube);
-thumbImportBtn.addEventListener("click", importFromFile);
-thumbClearBtn.addEventListener("click", clearThumbnail);
-thumbUrlInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    fetchFromYouTube();
+function renderNowPlaying() {
+  const targets = [$("now-playing"), $("music-popout-body")];
+  const song = state.music.queue[state.music.queueIndex];
+  for (const t of targets) {
+    if (!t) continue;
+    if (!song) {
+      t.className = "now-playing-empty";
+      t.innerHTML = "<p>Nothing playing</p>";
+      continue;
+    }
+    t.className = "now-playing";
+    const artURL = `/art/${encodePath(song.relPath)}?t=${Date.now()}`;
+    t.innerHTML = `
+      <div class="np-art"><img src="${artURL}" alt="" onerror="this.style.display='none'"></div>
+      <div class="np-meta">
+        <div class="np-title">${escapeHTML(song.title)}</div>
+        <div class="np-sub">${escapeHTML(song.artist)} — ${escapeHTML(song.album)}</div>
+      </div>
+      <div class="np-progress"><div class="np-bar" id="np-bar-${t.id}"></div></div>
+      <div class="np-controls">
+        <button class="np-btn" data-np="prev" title="Previous">⏮</button>
+        <button class="np-btn np-play" data-np="toggle" title="Play / pause">${state.music.paused ? "▶" : "⏸"}</button>
+        <button class="np-btn" data-np="next" title="Next">⏭</button>
+        <button class="np-btn" data-np="shuffle" title="Toggle shuffle"${state.music.shuffle ? ` class="active"` : ""}>🔀</button>
+        ${song.hasMV ? `<button class="np-btn" data-np="mv" title="Play music video">🎬</button>` : ""}
+        <button class="np-btn" data-np="popout" title="${state.music.popoutOpen ? "Close popout" : "Pop out"}">${state.music.popoutOpen ? "⤢" : "⛶"}</button>
+      </div>`;
+    t.querySelectorAll("[data-np]").forEach((btn) => {
+      btn.addEventListener("click", (e) => onPlayerControl(btn.dataset.np, e));
+    });
   }
+}
+
+function renderNowPlayingProgress() {
+  const audio = state.music.audio;
+  if (!audio || !audio.duration) return;
+  const pct = (audio.currentTime / audio.duration) * 100;
+  for (const id of ["np-bar-now-playing", "np-bar-music-popout-body"]) {
+    const bar = $(id);
+    if (bar) bar.style.width = pct + "%";
+  }
+}
+
+function onPlayerControl(action, e) {
+  e?.stopPropagation();
+  const audio = state.music.audio;
+  if (!audio) return;
+  switch (action) {
+    case "toggle":
+      if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+      break;
+    case "prev":
+      if (audio.currentTime > 3) { audio.currentTime = 0; }
+      else if (state.music.queueIndex > 0) { state.music.queueIndex--; loadAndPlayCurrent(); }
+      break;
+    case "next":
+      if (state.music.queueIndex < state.music.queue.length - 1) { state.music.queueIndex++; loadAndPlayCurrent(); }
+      break;
+    case "shuffle":
+      state.music.shuffle = !state.music.shuffle;
+      if (state.music.shuffle) {
+        const cur = state.music.queue[state.music.queueIndex];
+        const rest = state.music.queue.filter((_, i) => i !== state.music.queueIndex);
+        state.music.queue = [cur, ...shuffleArray(rest)];
+        state.music.queueIndex = 0;
+      }
+      renderNowPlaying();
+      break;
+    case "mv": {
+      const song = state.music.queue[state.music.queueIndex];
+      if (!song?.hasMV) return;
+      // Music videos live as a sidecar mp4 next to the m4a. Pause
+      // audio first so we don't play song + video together, then
+      // route through the video player overlay with a Music-tree
+      // URL. We don't go through playVideo() because position
+      // bookmarks aren't a thing for music videos (a song's audio
+      // already has its own queue position) — but we DO need to
+      // mark playerCurrent=null so closePlayer doesn't try to save
+      // a position to a bogus relPath.
+      audio.pause();
+      const mvRel = song.relPath.replace(/\.[^.]+$/, ".mp4");
+      state.playerCurrent = null;        // no resume bookmarks for MVs
+      stopPositionSaver();               // ditto — no periodic saves
+      playerVideo.src = `/audio/${encodePath(mvRel)}`;
+      playerTitle.textContent = `${song.artist} — ${song.title}`;
+      player.classList.remove("hidden");
+      playerVideo.play().catch(() => {});
+      break;
+    }
+    case "popout":
+      state.music.popoutOpen = !state.music.popoutOpen;
+      $("music-popout").classList.toggle("hidden", !state.music.popoutOpen);
+      renderNowPlaying();
+      break;
+  }
+}
+
+$("music-popout-close").addEventListener("click", () => {
+  state.music.popoutOpen = false;
+  $("music-popout").classList.add("hidden");
+  renderNowPlaying();
 });
 
-// ---- Add channel modal ---------------------------------------------------
+// ===========================================================================
+// MUSIC: attach music video modal
+// ===========================================================================
 
-const channelNameInput = $("channel-name-input");
-const channelStatus = $("channel-modal-status");
+let pendingMVSong = null;
 
-function openAddChannel() {
-  $("channel-modal-title").textContent = "New channel";
-  channelNameInput.value = "";
-  setStatusEl(channelStatus, "");
-  showModal(channelModal);
-  setTimeout(() => channelNameInput.focus(), 50);
+function openAttachMVModal(song) {
+  pendingMVSong = song;
+  $("addvideo-modal-title").textContent = `Attach music video to "${song.title}"`;
+  $("addvideo-hint").textContent = "Paste a YouTube URL — the resulting MP4 is attached to this song.";
+  $("addvideo-urls").value = "";
+  $("addvideo-quality-row").classList.remove("hidden");
+  $("addvideo-fetch").classList.add("hidden");
+  $("addvideo-manifest").classList.add("hidden");
+  $("addvideo-start").classList.remove("hidden");
+  $("addvideo-start").textContent = "Download + attach";
+  // Show the log strip so MV download progress / error output is
+  // visible — without this the MV flow runs silently and a failed
+  // download has nowhere to surface its yt-dlp / muxer message.
+  $("addvideo-log").classList.remove("hidden");
+  $("addvideo-log").textContent = "";
+  showModal($("addvideo-modal"));
+  setTimeout(() => $("addvideo-urls").focus(), 50);
 }
 
-async function saveChannel() {
-  const name = channelNameInput.value.trim();
-  if (!name) {
-    setStatusEl(channelStatus, "Enter a channel name.", "error");
-    return;
-  }
-  try {
-    await CreateChannel(name);
-    hideModal(channelModal);
-    state.itemsByKey.clear();
-    await reloadAfterMutation(name, null);
-  } catch (err) {
-    setStatusEl(channelStatus, String(err), "error");
-  }
-}
+// ===========================================================================
+// MUSIC: add-music modal
+// ===========================================================================
 
+$("add-music-btn").addEventListener("click", () => openAddDownloadsModal("music"));
+$("add-video-btn").addEventListener("click", () => openAddDownloadsModal("video"));
 $("add-channel-btn").addEventListener("click", openAddChannel);
-$("channel-save-btn").addEventListener("click", saveChannel);
-$("channel-cancel-btn").addEventListener("click", () => hideModal(channelModal));
-$("channel-modal-close").addEventListener("click", () => hideModal(channelModal));
-bindBackdropClose(channelModal);
-channelNameInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    saveChannel();
-  }
-});
-
-// ---- Add folder modal ----------------------------------------------------
-
-const folderNameInput = $("folder-name-input");
-const folderStatus = $("folder-modal-status");
-
-function openAddFolder() {
-  if (!state.selectedChannel) {
-    alert("Select a channel first.");
-    return;
-  }
-  $("folder-modal-channel").textContent = state.selectedChannel;
-  folderNameInput.value = "";
-  setStatusEl(folderStatus, "");
-  showModal(folderModal);
-  setTimeout(() => folderNameInput.focus(), 50);
-}
-
-async function saveFolder() {
-  const name = folderNameInput.value.trim();
-  if (!name) {
-    setStatusEl(folderStatus, "Enter a folder name.", "error");
-    return;
-  }
-  try {
-    await CreateFolder(state.selectedChannel, name);
-    hideModal(folderModal);
-    state.itemsByKey.clear();
-    // Stay at the channel root so the user can see the new folder.
-    state.currentFolder = null;
-    await reloadAfterMutation(state.selectedChannel, null);
-  } catch (err) {
-    setStatusEl(folderStatus, String(err), "error");
-  }
-}
-
 $("add-folder-btn").addEventListener("click", openAddFolder);
-$("folder-save-btn").addEventListener("click", saveFolder);
-$("folder-cancel-btn").addEventListener("click", () => hideModal(folderModal));
-$("folder-modal-close").addEventListener("click", () => hideModal(folderModal));
-bindBackdropClose(folderModal);
-folderNameInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    saveFolder();
+
+function openAddDownloadsModal(kind) {
+  pendingMVSong = null;
+  if (kind === "music") {
+    $("addvideo-modal-title").textContent = "Add music";
+    $("addvideo-hint").textContent = "Paste YouTube Music song or album URLs (one per line). Tracks land under Music/Artist/Album/.";
+    $("addvideo-quality-row").classList.add("hidden");
+  } else {
+    if (!state.selectedChannel) { alert("Select a channel first."); return; }
+    const target = state.currentFolder
+      ? `${state.selectedChannel} / 📁 ${state.currentFolder}`
+      : state.selectedChannel;
+    $("addvideo-modal-title").textContent = `Add videos to ${target}`;
+    $("addvideo-hint").textContent = "Paste YouTube URLs — playlists create a folder under the channel and download every entry.";
+    $("addvideo-quality-row").classList.remove("hidden");
+  }
+  $("addvideo-urls").value = "";
+  $("addvideo-fetch").classList.remove("hidden");
+  $("addvideo-manifest").classList.add("hidden");
+  $("addvideo-manifest").innerHTML = "";
+  $("addvideo-start").classList.add("hidden");
+  $("addvideo-start").textContent = "Start downloading";
+  $("addvideo-log").classList.add("hidden");
+  $("addvideo-log").textContent = "";
+  $("addvideo-modal").dataset.kind = kind;
+  showModal($("addvideo-modal"));
+  setTimeout(() => $("addvideo-urls").focus(), 50);
+}
+
+// ---- Manifest pre-fetch + per-item download progress --------------------
+
+let downloadBusy = false;
+let manifestEntries = [];
+
+$("addvideo-fetch").addEventListener("click", async () => {
+  const urls = $("addvideo-urls").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (urls.length === 0) {
+    $("addvideo-log").classList.remove("hidden");
+    $("addvideo-log").textContent = "Paste at least one URL.";
+    return;
+  }
+  $("addvideo-fetch").disabled = true;
+  $("addvideo-fetch").textContent = "Fetching titles…";
+  try {
+    manifestEntries = await App.FetchDownloadManifest(urls);
+    renderManifestList();
+    $("addvideo-manifest").classList.remove("hidden");
+    $("addvideo-start").classList.remove("hidden");
+  } catch (err) {
+    alert(`Couldn't fetch titles: ${err}`);
+  } finally {
+    $("addvideo-fetch").disabled = false;
+    $("addvideo-fetch").textContent = "List items";
   }
 });
 
-// ---- Add videos modal (yt-dlp) -------------------------------------------
-
-const addvideoUrls = $("addvideo-urls");
-const addvideoStart = $("addvideo-start");
-const addvideoCancel = $("addvideo-cancel");
-const addvideoTarget = $("addvideo-target");
-const addvideoQuality = $("addvideo-quality");
-const addvideoProgress = $("addvideo-progress");
-const addvideoSummary = $("addvideo-summary");
-const addvideoLog = $("addvideo-log");
-
-let addvideoBusy = false;
-
-function openAddVideos() {
-  if (!state.selectedChannel) {
-    alert("Select a channel first to add videos to.");
-    return;
+function renderManifestList() {
+  const ul = $("addvideo-manifest");
+  ul.innerHTML = "";
+  for (const entry of manifestEntries) {
+    const li = document.createElement("li");
+    li.className = "manifest-entry";
+    const itemsHTML = entry.items.length > 1
+      ? `<ul class="manifest-items">` +
+        entry.items.map((it, i) => `
+          <li class="manifest-item" data-key="${escapeHTML(entry.url)}::${i}">
+            <span class="mi-title">${escapeHTML(it.title)}</span>
+            <div class="mi-progress"><div class="mi-bar"></div></div>
+          </li>`).join("") + `</ul>`
+      : `<div class="manifest-item" data-key="${escapeHTML(entry.url)}::0">
+           <span class="mi-title">${escapeHTML(entry.title)}</span>
+           <div class="mi-progress"><div class="mi-bar"></div></div>
+         </div>`;
+    li.innerHTML = `<div class="manifest-head">${entry.kind === "playlist" ? "📑" : "▶"} ${escapeHTML(entry.title)} <span class="muted">(${entry.items.length} item${entry.items.length === 1 ? "" : "s"})</span></div>${itemsHTML}`;
+    ul.appendChild(li);
   }
-  // Show the destination — channel root, or "Channel / Folder" when
-  // we're currently inside a folder. Downloads land there (playlists
-  // still split into a new folder under the channel root).
-  addvideoTarget.textContent = state.currentFolder
-    ? `${state.selectedChannel} / 📁 ${state.currentFolder}`
-    : state.selectedChannel;
-  addvideoUrls.value = "";
-  addvideoQuality.value = "fhd";
-  addvideoProgress.classList.add("hidden");
-  addvideoLog.textContent = "";
-  addvideoSummary.textContent = "";
-  addvideoStart.disabled = false;
-  addvideoCancel.textContent = "Close";
-  showModal(addvideoModal);
-  setTimeout(() => addvideoUrls.focus(), 50);
 }
 
-async function startAddVideos() {
-  if (addvideoBusy) return;
-  const lines = addvideoUrls.value
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (lines.length === 0) {
-    addvideoSummary.textContent = "Paste at least one URL.";
-    addvideoProgress.classList.remove("hidden");
-    return;
-  }
+$("addvideo-start").addEventListener("click", async () => {
+  if (downloadBusy) return;
+  downloadBusy = true;
+  $("addvideo-start").disabled = true;
+  $("addvideo-fetch").disabled = true;
+  $("addvideo-cancel").disabled = true;
+  $("addvideo-log").classList.remove("hidden");
+  $("addvideo-log").textContent = "";
 
-  addvideoBusy = true;
-  addvideoStart.disabled = true;
-  addvideoUrls.disabled = true;
-  addvideoQuality.disabled = true;
-  addvideoProgress.classList.remove("hidden");
-  addvideoLog.textContent = "";
-  addvideoSummary.textContent = "Starting…";
-
-  const destFolder = state.currentFolder || "";
+  const kind = $("addvideo-modal").dataset.kind;
+  const urls = $("addvideo-urls").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   try {
-    await AddVideos(state.selectedChannel, destFolder, lines, addvideoQuality.value);
-    addvideoSummary.textContent = `✓ Done — ${lines.length} URL${
-      lines.length === 1 ? "" : "s"
-    } processed.`;
-    addvideoCancel.textContent = "Done";
-    state.itemsByKey.clear();
-    await reloadAfterMutation(state.selectedChannel, state.currentFolder);
+    if (pendingMVSong) {
+      await App.AddMusicVideo(pendingMVSong.relPath, urls[0], $("addvideo-quality").value);
+      pendingMVSong = null;
+      hideModal($("addvideo-modal"));
+      await renderMusicTab();
+    } else if (kind === "music") {
+      await App.AddMusic(urls);
+      hideModal($("addvideo-modal"));
+      await renderMusicTab();
+    } else {
+      await App.AddVideos(state.selectedChannel, state.currentFolder || "", urls, $("addvideo-quality").value);
+      state.itemsByKey.clear();
+      hideModal($("addvideo-modal"));
+      await renderVideosTab();
+    }
   } catch (err) {
-    addvideoSummary.textContent = `✗ Error: ${String(err)}`;
+    appendDownloadLog(`✗ ${err}`);
   } finally {
-    addvideoBusy = false;
-    addvideoStart.disabled = false;
-    addvideoUrls.disabled = false;
-    addvideoQuality.disabled = false;
+    downloadBusy = false;
+    $("addvideo-start").disabled = false;
+    $("addvideo-fetch").disabled = false;
+    $("addvideo-cancel").disabled = false;
   }
-}
+});
+
+$("addvideo-cancel").addEventListener("click", () => {
+  if (downloadBusy) return;
+  hideModal($("addvideo-modal"));
+});
+$("addvideo-close").addEventListener("click", () => {
+  if (downloadBusy) return;
+  hideModal($("addvideo-modal"));
+});
 
 function onYtdlpProgress(data) {
   if (!data) return;
-  if (data.phase === "starting") {
-    addvideoSummary.textContent = `[${data.current}/${data.total}] Downloading: ${data.url}`;
-  } else if (data.phase === "done") {
-    addvideoSummary.textContent = `[${data.current}/${data.total}] ✓ Finished: ${data.url}`;
+  if (data.phase === "log" && data.line) {
+    appendDownloadLog(data.line);
+    // Try to advance per-item progress bars by matching log lines
+    // to the manifest entries. yt-dlp emits "[download]  X.X% of …"
+    // lines we can scrape.
+    const m = /\[download\]\s+([\d.]+)%/.exec(data.line);
+    if (m && data.url) {
+      // Update the current playlist's currently-active item (we don't
+      // know the index per-line, so just update the first non-100%
+      // item under that URL).
+      const entry = manifestEntries.find((e) => e.url === data.url);
+      if (entry) {
+        const items = $("addvideo-manifest").querySelectorAll(`[data-key^="${cssEscape(data.url)}::"]`);
+        for (const node of items) {
+          const bar = node.querySelector(".mi-bar");
+          const cur = parseFloat(bar.style.width) || 0;
+          if (cur < 100) {
+            bar.style.width = m[1] + "%";
+            break;
+          }
+        }
+      }
+    }
+  } else if (data.phase === "done" && data.url) {
+    // Mark all items under that URL as 100%.
+    const items = $("addvideo-manifest").querySelectorAll(`[data-key^="${cssEscape(data.url)}::"]`);
+    for (const node of items) {
+      node.querySelector(".mi-bar").style.width = "100%";
+    }
   } else if (data.phase === "error") {
-    addvideoSummary.textContent = `[${data.current}/${data.total}] ✗ ${data.url}`;
-  } else if (data.phase === "all-done") {
-    addvideoSummary.textContent = `✓ All ${data.total} done.`;
-  } else if (data.phase === "log" && data.line) {
-    appendLog(data.line);
+    appendDownloadLog(`✗ ${data.url}: ${data.error}`);
   }
 }
 
-function appendLog(line) {
-  // Cap log size so a 4-hour download doesn't accumulate megabytes
-  // of progress lines in the DOM.
+function appendDownloadLog(line) {
+  const log = $("addvideo-log");
   const max = 200;
-  const lines = addvideoLog.textContent.split("\n");
+  const lines = log.textContent.split("\n");
   lines.push(line);
   if (lines.length > max) lines.splice(0, lines.length - max);
-  addvideoLog.textContent = lines.join("\n");
-  addvideoLog.scrollTop = addvideoLog.scrollHeight;
+  log.textContent = lines.join("\n");
+  log.scrollTop = log.scrollHeight;
 }
 
-$("add-video-btn").addEventListener("click", openAddVideos);
-addvideoStart.addEventListener("click", startAddVideos);
-addvideoCancel.addEventListener("click", () => {
-  if (addvideoBusy) return; // can't close mid-download
-  hideModal(addvideoModal);
+function cssEscape(s) {
+  return s.replace(/["\\]/g, "\\$&");
+}
+
+// ===========================================================================
+// VIDEOS: existing modals (channel / folder / move / rename / confirm / thumb)
+// ===========================================================================
+
+const thumbModal = $("thumb-modal");
+function openThumbModal(v) {
+  $("thumb-url-input").value = "";
+  setStatusEl($("thumb-modal-status"), "");
+  showModal(thumbModal);
+  setTimeout(() => $("thumb-url-input").focus(), 50);
+}
+$("thumb-modal-close").addEventListener("click", () => hideModal(thumbModal));
+bindBackdropClose(thumbModal);
+
+$("thumb-fetch-btn").addEventListener("click", async () => {
+  const v = state.selectedItem;
+  if (!v) return;
+  const input = $("thumb-url-input").value.trim();
+  if (!input) { setStatusEl($("thumb-modal-status"), "Paste a YouTube URL or video ID.", "error"); return; }
+  setStatusEl($("thumb-modal-status"), "Fetching from YouTube…", "info");
+  try {
+    await App.FetchThumbnailFromYouTube(v.relPath, input);
+    setStatusEl($("thumb-modal-status"), "Saved.", "ok");
+    await renderDetail(v);
+    setTimeout(() => hideModal(thumbModal), 600);
+  } catch (err) { setStatusEl($("thumb-modal-status"), String(err), "error"); }
 });
-$("addvideo-close").addEventListener("click", () => {
-  if (addvideoBusy) return;
-  hideModal(addvideoModal);
+$("thumb-import-btn").addEventListener("click", async () => {
+  const v = state.selectedItem; if (!v) return;
+  try {
+    const file = await OpenFileDialog({
+      Title: "Choose a thumbnail image",
+      Filters: [{ DisplayName: "Images", Pattern: "*.jpg;*.jpeg;*.png;*.webp" }],
+    });
+    if (!file) return;
+    await App.ImportThumbnailFromFile(v.relPath, file);
+    setStatusEl($("thumb-modal-status"), "Saved.", "ok");
+    await renderDetail(v);
+    setTimeout(() => hideModal(thumbModal), 600);
+  } catch (err) { setStatusEl($("thumb-modal-status"), String(err), "error"); }
+});
+$("thumb-clear-btn").addEventListener("click", async () => {
+  const v = state.selectedItem; if (!v) return;
+  try { await App.ClearThumbnail(v.relPath); await renderDetail(v); hideModal(thumbModal); }
+  catch (err) { setStatusEl($("thumb-modal-status"), String(err), "error"); }
 });
 
-// ---- Move-to-folder modal -----------------------------------------------
+// Add channel modal
+function openAddChannel() {
+  $("channel-modal-title").textContent = "New channel";
+  $("channel-name-input").value = "";
+  setStatusEl($("channel-modal-status"), "");
+  showModal($("channel-modal"));
+  setTimeout(() => $("channel-name-input").focus(), 50);
+}
+$("channel-save-btn").addEventListener("click", async () => {
+  const name = $("channel-name-input").value.trim();
+  if (!name) { setStatusEl($("channel-modal-status"), "Enter a name.", "error"); return; }
+  try {
+    await App.CreateChannel(name);
+    hideModal($("channel-modal"));
+    state.itemsByKey.clear();
+    await renderVideosTab();
+  } catch (err) { setStatusEl($("channel-modal-status"), String(err), "error"); }
+});
+$("channel-cancel-btn").addEventListener("click", () => hideModal($("channel-modal")));
+$("channel-modal-close").addEventListener("click", () => hideModal($("channel-modal")));
+bindBackdropClose($("channel-modal"));
+$("channel-name-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("channel-save-btn").click(); }});
 
-const moveDestList = $("move-dest-list");
-const moveModalStatus = $("move-modal-status");
+// Add folder modal
+function openAddFolder() {
+  if (!state.selectedChannel) { alert("Select a channel first."); return; }
+  $("folder-modal-channel").textContent = state.selectedChannel;
+  $("folder-name-input").value = "";
+  setStatusEl($("folder-modal-status"), "");
+  showModal($("folder-modal"));
+  setTimeout(() => $("folder-name-input").focus(), 50);
+}
+$("folder-save-btn").addEventListener("click", async () => {
+  const name = $("folder-name-input").value.trim();
+  if (!name) { setStatusEl($("folder-modal-status"), "Enter a name.", "error"); return; }
+  try {
+    await App.CreateFolder(state.selectedChannel, name);
+    hideModal($("folder-modal"));
+    state.itemsByKey.clear();
+    state.currentFolder = null;
+    await renderVideosTab();
+  } catch (err) { setStatusEl($("folder-modal-status"), String(err), "error"); }
+});
+$("folder-cancel-btn").addEventListener("click", () => hideModal($("folder-modal")));
+$("folder-modal-close").addEventListener("click", () => hideModal($("folder-modal")));
+bindBackdropClose($("folder-modal"));
+$("folder-name-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("folder-save-btn").click(); }});
 
-let moveTarget = null; // {relPath, name, folder} of the video being moved
-
+// Move modal
 async function openMoveVideo(v) {
-  moveTarget = { relPath: v.relPath, name: v.name, folder: v.folder || "" };
   $("move-modal-name").textContent = v.name;
   $("move-modal-channel").textContent = v.channel;
-  setStatusEl(moveModalStatus, "");
-  moveDestList.innerHTML = "<li class=\"move-dest-loading\">Loading…</li>";
-  showModal(moveModal);
-
-  // Fetch the channel's items so we can list the available folders.
-  // Always re-fetch (don't read from itemsByKey) — folder list might
-  // have changed since the user entered the channel.
-  let items;
-  try {
-    items = await Items(v.channel, "");
-  } catch (err) {
-    setStatusEl(moveModalStatus, String(err), "error");
-    moveDestList.innerHTML = "";
-    return;
-  }
+  setStatusEl($("move-modal-status"), "");
+  $("move-dest-list").innerHTML = "<li class=\"move-dest-loading\">Loading…</li>";
+  showModal($("move-modal"));
+  let items = [];
+  try { items = await App.Items(v.channel, ""); } catch (e) { alert(e); return; }
   const folders = items.filter((it) => it.kind === "folder").map((it) => it.name);
-
-  moveDestList.innerHTML = "";
-  // "Channel root" as a destination, hidden if we're already there.
-  if (moveTarget.folder !== "") {
-    moveDestList.appendChild(buildMoveDestRow("", "↩ Channel root"));
+  $("move-dest-list").innerHTML = "";
+  if (v.folder) {
+    const li = document.createElement("li");
+    li.className = "move-dest-row";
+    li.textContent = "↩ Channel root";
+    li.addEventListener("click", () => doMove(v, ""));
+    $("move-dest-list").appendChild(li);
   }
   for (const f of folders) {
-    if (f === moveTarget.folder) continue; // already there
-    moveDestList.appendChild(buildMoveDestRow(f, `📁 ${f}`));
+    if (f === v.folder) continue;
+    const li = document.createElement("li");
+    li.className = "move-dest-row";
+    li.textContent = `📁 ${f}`;
+    li.addEventListener("click", () => doMove(v, f));
+    $("move-dest-list").appendChild(li);
   }
-  if (moveDestList.children.length === 0) {
-    moveDestList.innerHTML = `<li class="move-dest-empty">No other folders in this channel — create one with the 📁＋ button.</li>`;
+  if ($("move-dest-list").children.length === 0) {
+    $("move-dest-list").innerHTML = `<li class="move-dest-empty">No other folders in this channel.</li>`;
   }
 }
-
-function buildMoveDestRow(folder, label) {
-  const li = document.createElement("li");
-  li.className = "move-dest-row";
-  li.textContent = label;
-  li.addEventListener("click", async () => {
-    if (!moveTarget) return;
-    setStatusEl(moveModalStatus, "Moving…", "info");
-    try {
-      await MoveVideo(moveTarget.relPath, folder);
-      hideModal(moveModal);
-      state.itemsByKey.clear();
-      // If we were inside the source folder and that folder is now
-      // empty, the user stays inside it — that's fine, the items list
-      // will re-render empty. If they were at root, the moved video
-      // disappears. Either way, refresh in place.
-      await reloadAfterMutation(state.selectedChannel, state.currentFolder);
-    } catch (err) {
-      setStatusEl(moveModalStatus, String(err), "error");
-    }
-  });
-  return li;
+async function doMove(v, folder) {
+  setStatusEl($("move-modal-status"), "Moving…", "info");
+  try { await App.MoveVideo(v.relPath, folder); hideModal($("move-modal")); state.itemsByKey.clear(); await renderVideosTab(); }
+  catch (err) { setStatusEl($("move-modal-status"), String(err), "error"); }
 }
+$("move-cancel-btn").addEventListener("click", () => hideModal($("move-modal")));
+$("move-modal-close").addEventListener("click", () => hideModal($("move-modal")));
+bindBackdropClose($("move-modal"));
 
-$("move-cancel-btn").addEventListener("click", () => hideModal(moveModal));
-$("move-modal-close").addEventListener("click", () => hideModal(moveModal));
-bindBackdropClose(moveModal);
-
-// ---- Rename modal --------------------------------------------------------
-
-const renameInput = $("rename-input");
-const renameStatus = $("rename-status");
-
+// Rename modal
 function openRenameChannel(name) {
   state.renameTarget = { kind: "channel", currentName: name };
   $("rename-modal-title").textContent = "Rename channel";
   $("rename-modal-hint").textContent = `Enter a new name for "${name}".`;
-  renameInput.value = name;
-  setStatusEl(renameStatus, "");
-  showModal(renameModal);
-  setTimeout(() => {
-    renameInput.focus();
-    renameInput.select();
-  }, 50);
+  openRenameModal(name);
 }
-
 function openRenameFolder(name) {
-  state.renameTarget = {
-    kind: "folder",
-    currentName: name,
-    channel: state.selectedChannel,
-  };
+  state.renameTarget = { kind: "folder", currentName: name, channel: state.selectedChannel };
   $("rename-modal-title").textContent = "Rename folder";
   $("rename-modal-hint").textContent = `Enter a new name for folder "${name}".`;
-  renameInput.value = name;
-  setStatusEl(renameStatus, "");
-  showModal(renameModal);
-  setTimeout(() => {
-    renameInput.focus();
-    renameInput.select();
-  }, 50);
+  openRenameModal(name);
 }
-
 function openRenameVideo(v) {
-  state.renameTarget = {
-    kind: "video",
-    currentName: v.name,
-    relPath: v.relPath,
-  };
+  state.renameTarget = { kind: "video", currentName: v.name, relPath: v.relPath };
   $("rename-modal-title").textContent = "Rename video";
   $("rename-modal-hint").textContent = "New name (extension is preserved):";
-  renameInput.value = v.name;
-  setStatusEl(renameStatus, "");
-  showModal(renameModal);
-  setTimeout(() => {
-    renameInput.focus();
-    renameInput.select();
-  }, 50);
+  openRenameModal(v.name);
 }
-
-async function saveRename() {
-  const target = state.renameTarget;
-  if (!target) return;
-  const newName = renameInput.value.trim();
-  if (!newName) {
-    setStatusEl(renameStatus, "Name cannot be empty.", "error");
-    return;
-  }
-  if (newName === target.currentName) {
-    hideModal(renameModal);
-    return;
-  }
-
+function openRenameModal(value) {
+  $("rename-input").value = value;
+  setStatusEl($("rename-status"), "");
+  showModal($("rename-modal"));
+  setTimeout(() => { $("rename-input").focus(); $("rename-input").select(); }, 50);
+}
+$("rename-save-btn").addEventListener("click", async () => {
+  const t = state.renameTarget; if (!t) return;
+  const newName = $("rename-input").value.trim();
+  if (!newName) { setStatusEl($("rename-status"), "Name cannot be empty.", "error"); return; }
+  if (newName === t.currentName) { hideModal($("rename-modal")); return; }
   try {
-    if (target.kind === "channel") {
-      await RenameChannel(target.currentName, newName);
-      state.itemsByKey.clear();
-      hideModal(renameModal);
-      await reloadAfterMutation(newName, null);
-    } else if (target.kind === "folder") {
-      await RenameFolder(target.channel, target.currentName, newName);
-      state.itemsByKey.clear();
-      // If the user was inside the renamed folder, follow the rename.
-      const nextFolder = state.currentFolder === target.currentName ? newName : state.currentFolder;
-      hideModal(renameModal);
-      await reloadAfterMutation(state.selectedChannel, nextFolder);
+    if (t.kind === "channel") {
+      await App.RenameChannel(t.currentName, newName);
+      // Renaming the channel invalidates the selectedChannel pointer;
+      // re-target so renderVideosTab picks the renamed channel.
+      if (state.selectedChannel === t.currentName) {
+        state.selectedChannel = newName;
+      }
+    } else if (t.kind === "folder") {
+      await App.RenameFolder(t.channel, t.currentName, newName);
+      if (state.currentFolder === t.currentName) {
+        state.currentFolder = newName;
+      }
     } else {
-      await RenameVideo(target.relPath, newName);
-      state.itemsByKey.clear();
-      hideModal(renameModal);
-      await reloadAfterMutation(state.selectedChannel, state.currentFolder);
+      await App.RenameVideo(t.relPath, newName);
     }
-  } catch (err) {
-    setStatusEl(renameStatus, String(err), "error");
-  }
-}
-
-$("rename-save-btn").addEventListener("click", saveRename);
-$("rename-cancel-btn").addEventListener("click", () => hideModal(renameModal));
-$("rename-modal-close").addEventListener("click", () => hideModal(renameModal));
-bindBackdropClose(renameModal);
-renameInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    saveRename();
-  }
+    state.itemsByKey.clear();
+    hideModal($("rename-modal"));
+    await renderVideosTab();
+  } catch (err) { setStatusEl($("rename-status"), String(err), "error"); }
 });
+$("rename-cancel-btn").addEventListener("click", () => hideModal($("rename-modal")));
+$("rename-modal-close").addEventListener("click", () => hideModal($("rename-modal")));
+bindBackdropClose($("rename-modal"));
+$("rename-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("rename-save-btn").click(); }});
 
-// ---- Confirm modal -------------------------------------------------------
-
-// openConfirm renders the shared confirm modal. opts:
-//   title, message, hint?
-//   primary: { label, kind: "danger-primary"|"primary", action }
-//   alt?:    { label, kind, action }   — second button next to primary
+// Confirm modal
 function openConfirm(opts) {
   $("confirm-title").textContent = opts.title;
   $("confirm-message").textContent = opts.message;
-  $("confirm-hint").innerHTML = opts.hint || `Moves to <code>Videos/.trash/</code> — recoverable until you delete that folder manually.`;
-
-  const yes = $("confirm-yes");
-  yes.textContent = opts.primary.label;
-  yes.className = `${opts.primary.kind || "danger-primary"}`;
+  $("confirm-hint").innerHTML = opts.hint || `Moves to <code>.trash/</code> — recoverable until you delete that folder manually.`;
+  const yes = $("confirm-yes"); yes.textContent = opts.primary.label; yes.className = opts.primary.kind || "danger-primary";
   state.confirmAction = opts.primary.action;
-
   const alt = $("confirm-yes-alt");
   if (opts.alt) {
     alt.textContent = opts.alt.label;
@@ -964,125 +1324,58 @@ function openConfirm(opts) {
     alt.classList.add("hidden");
     state.confirmAltAction = null;
   }
-
-  showModal(confirmModal);
+  showModal($("confirm-modal"));
 }
-
 function confirmDeleteChannel(name, count) {
-  const word = count === 1 ? "video" : "videos";
   openConfirm({
     title: "Delete channel",
-    message: `Move "${name}" and its ${count} ${word} to .trash?`,
-    primary: {
-      label: "Move to trash",
-      kind: "danger-primary",
-      action: async () => {
-        try {
-          await DeleteChannel(name);
-          state.itemsByKey.clear();
-          if (state.selectedChannel === name) {
-            state.selectedChannel = null;
-            state.currentFolder = null;
-          }
-          hideModal(confirmModal);
-          await reloadAfterMutation(null, null);
-        } catch (err) {
-          alert(String(err));
-        }
-      },
-    },
+    message: `Move "${name}" and its ${count} video${count === 1 ? "" : "s"} to .trash?`,
+    primary: { label: "Move to trash", kind: "danger-primary", action: async () => {
+      try { await App.DeleteChannel(name); state.itemsByKey.clear(); state.selectedChannel = null; hideModal($("confirm-modal")); await renderVideosTab(); }
+      catch (err) { alert(String(err)); }
+    }},
   });
 }
-
 function confirmDeleteVideo(v) {
   openConfirm({
-    title: "Delete video",
-    message: `Move "${v.name}" to .trash?`,
-    primary: {
-      label: "Move to trash",
-      kind: "danger-primary",
-      action: async () => {
-        try {
-          await DeleteVideo(v.relPath);
-          state.itemsByKey.clear();
-          hideModal(confirmModal);
-          await reloadAfterMutation(state.selectedChannel, state.currentFolder);
-        } catch (err) {
-          alert(String(err));
-        }
-      },
-    },
+    title: "Delete video", message: `Move "${v.name}" to .trash?`,
+    primary: { label: "Move to trash", kind: "danger-primary", action: async () => {
+      try { await App.DeleteVideo(v.relPath); state.itemsByKey.clear(); hideModal($("confirm-modal")); await renderVideosTab(); }
+      catch (err) { alert(String(err)); }
+    }},
   });
 }
-
 function confirmDeleteFolder(name, count) {
-  const word = count === 1 ? "video" : "videos";
   openConfirm({
     title: "Empty or delete folder",
-    message: `"${name}" contains ${count} ${word}.`,
-    hint: `<b>Empty</b> moves the videos out to the channel root and removes the folder. <b>Delete</b> moves the folder and everything inside to <code>.trash</code>.`,
-    primary: {
-      label: "Delete folder + videos",
-      kind: "danger-primary",
-      action: async () => {
-        try {
-          await DeleteFolder(state.selectedChannel, name);
-          state.itemsByKey.clear();
-          // If we happened to be inside that folder, climb out.
-          if (state.currentFolder === name) state.currentFolder = null;
-          hideModal(confirmModal);
-          await reloadAfterMutation(state.selectedChannel, state.currentFolder);
-        } catch (err) {
-          alert(String(err));
-        }
-      },
-    },
-    alt: {
-      label: "Empty (keep videos)",
-      kind: "primary",
-      action: async () => {
-        try {
-          await EmptyFolder(state.selectedChannel, name);
-          state.itemsByKey.clear();
-          if (state.currentFolder === name) state.currentFolder = null;
-          hideModal(confirmModal);
-          await reloadAfterMutation(state.selectedChannel, state.currentFolder);
-        } catch (err) {
-          alert(String(err));
-        }
-      },
-    },
+    message: `"${name}" contains ${count} video${count === 1 ? "" : "s"}.`,
+    hint: `<b>Empty</b> moves the videos to the channel root and removes the folder. <b>Delete</b> moves the folder and everything to <code>.trash</code>.`,
+    primary: { label: "Delete folder + videos", kind: "danger-primary", action: async () => {
+      try { await App.DeleteFolder(state.selectedChannel, name); state.itemsByKey.clear();
+        if (state.currentFolder === name) state.currentFolder = null;
+        hideModal($("confirm-modal")); await renderVideosTab(); }
+      catch (err) { alert(String(err)); }
+    }},
+    alt: { label: "Empty (keep videos)", kind: "primary", action: async () => {
+      try { await App.EmptyFolder(state.selectedChannel, name); state.itemsByKey.clear();
+        if (state.currentFolder === name) state.currentFolder = null;
+        hideModal($("confirm-modal")); await renderVideosTab(); }
+      catch (err) { alert(String(err)); }
+    }},
   });
 }
+$("confirm-yes").addEventListener("click", async () => { const a = state.confirmAction; state.confirmAction = null; state.confirmAltAction = null; if (a) await a(); });
+$("confirm-yes-alt").addEventListener("click", async () => { const a = state.confirmAltAction; state.confirmAction = null; state.confirmAltAction = null; if (a) await a(); });
+$("confirm-no").addEventListener("click", () => hideModal($("confirm-modal")));
+$("confirm-close").addEventListener("click", () => hideModal($("confirm-modal")));
+bindBackdropClose($("confirm-modal"));
 
-$("confirm-yes").addEventListener("click", async () => {
-  const action = state.confirmAction;
-  state.confirmAction = null;
-  state.confirmAltAction = null;
-  if (action) await action();
-});
-$("confirm-yes-alt").addEventListener("click", async () => {
-  const action = state.confirmAltAction;
-  state.confirmAction = null;
-  state.confirmAltAction = null;
-  if (action) await action();
-});
-$("confirm-no").addEventListener("click", () => hideModal(confirmModal));
-$("confirm-close").addEventListener("click", () => hideModal(confirmModal));
-bindBackdropClose(confirmModal);
-
-// ---- Edit mode toggle ----------------------------------------------------
+// ===========================================================================
+// EDIT CAPABILITY (yt-dlp + online check; only meaningful for Editor)
+// ===========================================================================
 
 async function refreshEditCapability(forceServerCheck) {
-  state.editCap = forceServerCheck
-    ? await RefreshEditCapability()
-    : await GetEditCapability();
-  renderEditToggle();
-
-  // While yt-dlp is still extracting on first launch, the backend
-  // reports a "Preparing yt-dlp…" reason. Auto-poll once a second
-  // until that resolves so the user doesn't have to know to click
-  // the disabled badge — this is fully transparent on first run.
+  state.editCap = forceServerCheck ? await App.RefreshEditCapability() : await App.GetEditCapability();
   if (state.editCap?.reason === "Preparing yt-dlp…") {
     clearTimeout(state.preparingPoll);
     state.preparingPoll = setTimeout(() => refreshEditCapability(true), 1000);
@@ -1092,230 +1385,60 @@ async function refreshEditCapability(forceServerCheck) {
   }
 }
 
-function renderEditToggle() {
-  const cap = state.editCap;
-  if (!cap) {
-    editToggle.textContent = "Loading…";
-    editToggle.disabled = true;
-    return;
-  }
+// ===========================================================================
+// HELPERS
+// ===========================================================================
 
-  if (state.editing) {
-    editToggle.textContent = "✓ Done editing";
-    editToggle.disabled = false;
-    editToggle.classList.add("active");
-    editToggle.classList.remove("disabled");
-    document.body.classList.add("edit-mode");
-    return;
-  }
-
-  document.body.classList.remove("edit-mode");
-  editToggle.classList.remove("active");
-
-  if (cap.enabled) {
-    editToggle.textContent = "✎ Edit";
-    editToggle.disabled = false;
-    editToggle.classList.remove("disabled");
-    editToggle.title = `yt-dlp ${cap.ytDlpVersion || ""} · online`;
-  } else {
-    editToggle.textContent = `✎ ${cap.reason}`;
-    editToggle.classList.add("disabled");
-    editToggle.disabled = false;
-    editToggle.title = "Click to recheck";
-  }
+function showModal(m) { m.classList.remove("hidden"); }
+function hideModal(m) { m.classList.add("hidden"); }
+function setStatusEl(el, text, kind) { el.textContent = text || ""; el.className = `modal-hint modal-status ${kind || ""}`; }
+function highlightSelection(listEl, attrName, value) {
+  for (const li of listEl.children) li.classList.toggle("selected", li.dataset[attrName] === value);
 }
-
-editToggle.addEventListener("click", async () => {
-  const cap = state.editCap;
-  if (!cap) return;
-
-  if (state.editing) {
-    state.editing = false;
-    renderEditToggle();
-    return;
-  }
-
-  if (!cap.enabled) {
-    editToggle.textContent = "Checking…";
-    editToggle.disabled = true;
-    await refreshEditCapability(true);
-    return;
-  }
-
-  state.editing = true;
-  renderEditToggle();
-});
-
-// ---- Reload helpers ------------------------------------------------------
-
-// reloadAfterMutation refreshes the channel list and reselects either
-// the named channel or, if it's gone, the first available one. If a
-// folder is also passed, drills into it after the channel reload.
-async function reloadAfterMutation(channelToSelect, folderToSelect) {
-  const status = await Status();
-  if (status.ok) renderStats(status);
-
-  const channels = await Channels();
-  renderChannels(channels);
-
-  let target = channelToSelect;
-  if (!target || !channels.find((c) => c.name === target)) {
-    target = channels[0]?.name || null;
-  }
-
-  if (target) {
-    await selectChannel(target);
-    if (folderToSelect) {
-      // selectChannel resets to root; drill back in if requested. Make
-      // sure the folder still exists — if it was renamed/deleted we
-      // gracefully stay at the root.
-      const items = await Items(target, "");
-      if (items.find((it) => it.kind === "folder" && it.name === folderToSelect)) {
-        enterFolder(folderToSelect);
-      }
-    }
-  } else {
-    state.selectedChannel = null;
-    state.currentFolder = null;
-    state.selectedItem = null;
-    videosHeader.textContent = "Videos";
-    videoList.innerHTML = "";
-    detail.className = "detail-empty";
-    detail.innerHTML = "<p>Select a video</p>";
-  }
-}
-
-// ---- Global keyboard shortcuts -------------------------------------------
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    if (!player.classList.contains("hidden")) {
-      if (anyModalOpen()) return;
-      closePlayer();
-      return;
-    }
-    for (const m of [
-      confirmModal,
-      renameModal,
-      addvideoModal,
-      channelModal,
-      folderModal,
-      moveModal,
-      thumbModal,
-    ]) {
-      if (!m.classList.contains("hidden")) {
-        if (m === addvideoModal && addvideoBusy) return;
-        hideModal(m);
-        return;
-      }
-    }
-  }
-  if (e.key === "f" && !player.classList.contains("hidden")) {
-    if (!anyModalOpen() && document.activeElement?.tagName !== "INPUT") {
-      e.preventDefault();
-      toggleFullscreen();
-    }
-  }
-});
-
-function anyModalOpen() {
-  for (const m of [
-    confirmModal,
-    renameModal,
-    addvideoModal,
-    channelModal,
-    folderModal,
-    moveModal,
-    thumbModal,
-  ]) {
-    if (!m.classList.contains("hidden")) return true;
-  }
-  return false;
-}
-
-// ---- Status bar ----------------------------------------------------------
-
-function renderStats(status) {
-  statusStats.textContent = `${status.channels} channel${
-    status.channels === 1 ? "" : "s"
-  } · ${status.videos} video${
-    status.videos === 1 ? "" : "s"
-  } · ${formatDuration(status.totalSecs)} · ${formatBytes(status.totalBytes)}`;
-}
-
-// ---- Helpers -------------------------------------------------------------
-
-function showModal(m) {
-  m.classList.remove("hidden");
-}
-function hideModal(m) {
-  m.classList.add("hidden");
-}
-
-// bindBackdropClose closes the modal when the user clicks the dark
-// backdrop area (everything outside the .modal-card). It guards
-// against the "select-text-and-drag-out" case: a mousedown that
-// starts inside the card and ends on the backdrop must NOT close the
-// modal, because that would surprise users who drag-selected text in
-// an input and released the mouse outside.
 function bindBackdropClose(m) {
   let downOnBackdrop = false;
-  m.addEventListener("mousedown", (e) => {
-    downOnBackdrop = e.target === m;
-  });
-  m.addEventListener("click", (e) => {
-    if (e.target === m && downOnBackdrop) {
-      hideModal(m);
-    }
-    downOnBackdrop = false;
-  });
+  m.addEventListener("mousedown", (e) => { downOnBackdrop = e.target === m && !m.classList.contains("modal-blocking"); });
+  m.addEventListener("click", (e) => { if (e.target === m && downOnBackdrop) hideModal(m); downOnBackdrop = false; });
 }
-
-function setStatusEl(el, text, kind) {
-  el.textContent = text || "";
-  el.className = `modal-hint modal-status ${kind || ""}`;
-}
-
-function highlightSelection(listEl, attrName, value) {
-  for (const li of listEl.children) {
-    li.classList.toggle("selected", li.dataset[attrName] === value);
-  }
-}
-
 function formatDuration(sec) {
   if (!sec || !isFinite(sec)) return "—";
   sec = Math.round(sec);
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  return h
-    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-    : `${m}:${String(s).padStart(2, "0")}`;
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
-
 function formatBytes(n) {
   if (!n) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
-
 function escapeHTML(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+function encodePath(relPath) { return relPath.split("/").map(encodeURIComponent).join("/"); }
 
-function encodePath(relPath) {
-  return relPath.split("/").map(encodeURIComponent).join("/");
-}
-
-// ---- Go ------------------------------------------------------------------
+// Global keyboard
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!player.classList.contains("hidden")) { closePlayer(); return; }
+    if (state.music.popoutOpen) {
+      state.music.popoutOpen = false;
+      $("music-popout").classList.add("hidden");
+      renderNowPlaying();
+      return;
+    }
+    for (const id of ["confirm-modal", "rename-modal", "addvideo-modal", "channel-modal", "folder-modal", "move-modal", "thumb-modal", "add-account-modal"]) {
+      const m = $(id);
+      if (m && !m.classList.contains("hidden") && !m.classList.contains("modal-blocking")) {
+        if (id === "addvideo-modal" && downloadBusy) return;
+        hideModal(m); return;
+      }
+    }
+  }
+  if (e.key === "f" && !player.classList.contains("hidden") && document.activeElement?.tagName !== "INPUT") {
+    e.preventDefault(); toggleFullscreen();
+  }
+});
 
 init();

@@ -16,81 +16,199 @@ import (
 	"ytdisc/bundled"
 )
 
-// App is the singleton bound to the JS frontend. Wails turns its public
-// methods into async functions on `window.go.main.App.*`.
+// App is the singleton bound to the JS frontend. Wails turns its
+// public methods into async functions on `window.go.main.App.*`.
+//
+// As of v2.0.0 the drive layout is:
+//
+//   DriveRoot/
+//   ├── YTDisc.{app|exe|AppImage}
+//   ├── .data/                 (account metadata, playlists, per-account state)
+//   ├── Videos/                (video library + .thumbs + .trash)
+//   └── Music/                 (music library + .arts + .trash)
+//
+// The drive root is the directory the binary lives in (or one of its
+// ancestors, walking up until we find a Videos/ or .data/ marker).
+// All persistent app state lives inside the drive root — nothing goes
+// in the host's home directory unless extraction to Videos/.bin fails
+// for the embedded yt-dlp.
 type App struct {
 	ctx context.Context
 
+	// mu guards the in-memory library + thumbnail caches + currently
+	// loaded music library + the path fields below.
 	mu        sync.RWMutex
+	driveRoot string
 	videosDir string
+	musicDir  string
+	dataDir   string
 	library   *Library
+	music     *MusicLibrary
 
-	// In-memory thumbnail fallback when disk cache isn't writable
-	// (e.g. the USB stick is mounted read-only). Keyed by sha1 of the
-	// absolute video path.
+	// In-memory thumbnail fallback when disk cache isn't writable.
 	memThumbs map[string][]byte
 
-	// Cached result of edit-capability detection (yt-dlp present +
-	// internet reachable). See editor.go.
-	editCap editCapCache
-
-	// Resume-playback bookmarks, persisted to Videos/.state.json.
+	// Per-account state stores (.data/accounts/<id>/...).
+	accounts  *accountStore
+	subs      *subscriptionStore
 	positions *positionStore
+	playlists *playlistStore
 
-	// Monotonically-incrementing tag for thumbnail-discovery walks.
-	// Each Rescan bumps this, and any in-flight walk bails as soon as
-	// it notices its tag is stale. Without this, churn (rapid add/
-	// delete) stacks goroutines that all walk the library in parallel
-	// and race to write the same .thumbs/<key>.jpg files.
-	thumbWalkTag uint64
-
-	// Path of the embedded yt-dlp once it's been extracted to disk.
-	// Set asynchronously by extractEmbeddedYtdlpAsync, which runs as
-	// a goroutine kicked off in startup. We don't extract on the
-	// hot path of GetEditCapability because writing 35 MB and
-	// codesigning a universal binary can easily take 5+ seconds —
-	// long enough that the first JS call into Go appeared to hang
-	// the UI at "Loading…". Atomic so we don't need a mutex on the
-	// read-heavy resolveYtdlpPath path.
+	// Background-extraction state for the bundled yt-dlp.
 	ytdlpExtractedPath atomic.Pointer[string]
 	ytdlpExtracting    atomic.Bool
+
+	// Cached edit-capability state (yt-dlp present + internet
+	// reachable + current account is Editor).
+	editCap editCapCache
+
+	// Tag bumped on each Rescan; thumbnail-discovery walks bail out
+	// when their tag goes stale so churn doesn't stack goroutines.
+	thumbWalkTag uint64
+
+	// Boot state — set during startup based on what we find on disk.
+	// Read by GetBootState; the frontend uses it to decide whether to
+	// show the upgrade modal, the first-account creation modal, or
+	// the regular UI.
+	bootStateField BootState
+
+	// Stashed v1 positions during an in-progress drive upgrade.
+	// Populated by AcceptDriveUpgrade, consumed by CreateAccount
+	// when the first real account is created (which is the natural
+	// owner of the migrated bookmarks). nil when no upgrade is
+	// pending.
+	pendingV1Positions map[string]positionEntry
+}
+
+// BootState is the first thing the frontend asks for. The frontend
+// branches on .State to render the appropriate boot UI.
+type BootState struct {
+	State            string  `json:"state"`            // "ready" | "needs-upgrade" | "needs-first-account" | "no-library"
+	Message          string  `json:"message,omitempty"` // human-readable detail for "no-library"
+	CurrentAccount   *Account `json:"currentAccount,omitempty"`
+	HasMusicLibrary  bool    `json:"hasMusicLibrary"`
 }
 
 func NewApp() *App {
-	return &App{
+	a := &App{
 		memThumbs: make(map[string][]byte),
-		positions: newPositionStore(),
+		accounts:  newAccountStore(),
 	}
+	a.subs = newSubscriptionStore(a.accounts.stateDir)
+	a.positions = newPositionStore(a.accounts.stateDir)
+	a.playlists = newPlaylistStore()
+	return a
 }
 
-// Called by Wails after the webview is ready.
+// startup runs after the webview is ready. Locates the drive root,
+// initializes per-account state, decides the boot state, and kicks
+// off background work (yt-dlp extraction, thumbnail discovery).
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	dir, err := findVideosDir()
+
+	root, err := findDriveRoot()
 	if err != nil {
+		a.mu.Lock()
+		a.bootStateField = BootState{State: "no-library", Message: err.Error()}
+		a.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
 		return
 	}
 
+	videosDir := filepath.Join(root, "Videos")
+	musicDir := filepath.Join(root, "Music")
+	dataDir := filepath.Join(root, ".data")
+
+	// Make sure Videos/ exists — the rest of the app assumes it. We
+	// create Music/ on demand later.
+	if _, err := os.Stat(videosDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			_ = os.MkdirAll(videosDir, 0o755)
+		}
+	}
+
+	// Detect drive state: if .data/ exists we're already on a v2
+	// drive; otherwise check for the v1 marker (Videos/.state.json)
+	// to know whether to offer upgrade or treat as fresh.
+	hasDataDir := dirExists(dataDir)
+	hasV1Marker := fileExists(filepath.Join(videosDir, ".state.json"))
+
 	a.mu.Lock()
-	a.videosDir = dir
-	a.library = ScanLibrary(dir)
+	a.driveRoot = root
+	a.videosDir = videosDir
+	a.musicDir = musicDir
+	a.dataDir = dataDir
+	a.library = ScanLibrary(videosDir)
+	if dirExists(musicDir) {
+		a.music = ScanMusicLibrary(musicDir)
+	}
 	a.mu.Unlock()
 
-	// Load persisted resume-playback bookmarks. Cheap (small JSON
-	// file) so do it synchronously here.
-	a.positions.setLibDir(dir)
+	switch {
+	case !hasDataDir && hasV1Marker:
+		// v1 drive that needs explicit user consent to upgrade.
+		// Don't initialize stores yet; AcceptDriveUpgrade does that.
+		a.mu.Lock()
+		a.bootStateField = BootState{
+			State:           "needs-upgrade",
+			HasMusicLibrary: dirExists(musicDir),
+		}
+		a.mu.Unlock()
+	case !hasDataDir && !hasV1Marker:
+		// Fresh drive (or one only used for media, never opened by
+		// YTDisc). Initialize .data/, then prompt for first-account.
+		if err := a.accounts.setDataDir(dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: setting up .data/: %v\n", err)
+		}
+		_ = a.playlists.setDataDir(dataDir)
+		a.mu.Lock()
+		a.bootStateField = BootState{
+			State:           "needs-first-account",
+			HasMusicLibrary: dirExists(musicDir),
+		}
+		a.mu.Unlock()
+	default:
+		// .data/ exists — normal v2 boot.
+		if err := a.accounts.setDataDir(dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
+			if errors.Is(err, ErrAccountsFileCorrupt) {
+				a.mu.Lock()
+				a.bootStateField = BootState{
+					State:   "data-corrupt",
+					Message: "accounts.json is corrupt — restore from a backup or remove it to start fresh",
+				}
+				a.mu.Unlock()
+				return
+			}
+		}
+		_ = a.playlists.setDataDir(dataDir)
+		startupID := a.accounts.resolveStartupAccount()
+		if startupID == "" {
+			// .data/ existed but no real accounts — treat as
+			// first-account state.
+			a.mu.Lock()
+			a.bootStateField = BootState{
+				State:           "needs-first-account",
+				HasMusicLibrary: dirExists(musicDir),
+			}
+			a.mu.Unlock()
+		} else {
+			acct, _ := a.accounts.byID(startupID)
+			a.mu.Lock()
+			a.bootStateField = BootState{
+				State:           "ready",
+				CurrentAccount:  &acct,
+				HasMusicLibrary: dirExists(musicDir),
+			}
+			a.mu.Unlock()
+		}
+	}
 
-	// Extract the embedded yt-dlp on a background goroutine so the
-	// UI doesn't sit at "Loading…" while we write 35 MB to disk and
-	// run codesign on a universal binary. By the time the user
-	// clicks Edit, this should be done; if not, GetEditCapability
-	// reports a "Preparing yt-dlp…" state and the user can re-check.
+	// Background yt-dlp extraction (writes to Videos/.bin, falls
+	// back to user-cache dir if read-only). Same logic as v1.1.0.
 	go a.extractEmbeddedYtdlpAsync()
 
-	// Discover thumbnails (embedded MP4 cover art + sidecar files) for
-	// every video and pre-populate the cache. This runs in the
-	// background so the UI can render immediately.
+	// Kick off thumbnail discovery for the existing library.
 	a.mu.Lock()
 	a.thumbWalkTag++
 	tag := a.thumbWalkTag
@@ -98,11 +216,6 @@ func (a *App) startup(ctx context.Context) {
 	go a.discoverThumbnails(tag)
 }
 
-// extractEmbeddedYtdlpAsync writes the embedded yt-dlp binary to disk
-// and (on macOS) codesigns it for Gatekeeper. Runs once at startup.
-// On read-only Videos/ or pre-library-load calls, falls back to
-// extracting into the OS user-cache dir. Sets a.ytdlpExtractedPath
-// on success; resolveYtdlpPath reads that atomically.
 func (a *App) extractEmbeddedYtdlpAsync() {
 	if !bundled.HasEmbeddedYtdlp() {
 		return
@@ -114,14 +227,12 @@ func (a *App) extractEmbeddedYtdlpAsync() {
 	dir := a.videosDir
 	a.mu.RUnlock()
 
-	// Try Videos/.bin/ first — keeps yt-dlp on the USB stick.
 	if dir != "" {
 		if path, err := bundled.ExtractYtdlp(filepath.Join(dir, ".bin")); err == nil {
 			a.ytdlpExtractedPath.Store(&path)
 			return
 		}
 	}
-	// Fall back to user-cache dir for read-only USBs / library not loaded.
 	if cache, err := os.UserCacheDir(); err == nil {
 		if path, err := bundled.ExtractYtdlp(filepath.Join(cache, "YTDisc", "bin")); err == nil {
 			a.ytdlpExtractedPath.Store(&path)
@@ -129,11 +240,6 @@ func (a *App) extractEmbeddedYtdlpAsync() {
 	}
 }
 
-// discoverThumbnails walks the library and tries, for each video, to
-// populate the cache from embedded cover art or a sidecar image file.
-// `tag` is the generation this walk was started for; if Rescan bumps
-// the tag while we're running, we bail so a fresh walk can take over
-// without us doing duplicate work or racing on the same .thumbs files.
 func (a *App) discoverThumbnails(tag uint64) {
 	a.mu.RLock()
 	lib := a.library
@@ -142,11 +248,8 @@ func (a *App) discoverThumbnails(tag uint64) {
 	if lib == nil || current != tag {
 		return
 	}
-
 	for _, ch := range lib.Channels {
 		for _, v := range ch.allVideos() {
-			// Cheap check between videos so we exit promptly when
-			// the user is rapidly creating/deleting things.
 			a.mu.RLock()
 			stale := a.thumbWalkTag != tag
 			a.mu.RUnlock()
@@ -156,53 +259,109 @@ func (a *App) discoverThumbnails(tag uint64) {
 			if a.thumbCached(v.AbsPath) {
 				continue
 			}
-			// 1. Embedded cover art.
 			if data, err := extractEmbeddedThumb(v.AbsPath); err == nil {
 				_ = a.writeThumb(v.AbsPath, data)
 				continue
 			}
-			// 2. Sidecar image file.
 			if data, _, err := readSidecarThumb(v.AbsPath); err == nil {
 				_ = a.writeThumb(v.AbsPath, data)
 				continue
 			}
-			// 3. Nothing — leave empty. User can manually fetch
-			//    via FetchThumbnailFromYouTube or ImportThumbnail.
 		}
 	}
 }
 
-// ---- JS-callable methods --------------------------------------------------
+// ---- Boot + status JS-callable -------------------------------------------
 
-// Status returns whether the library was located and basic counts.
+func (a *App) GetBootState() BootState {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.bootStateField
+}
+
+// Status returns library aggregate counts. Used by the Accounts tab
+// stats panel — formerly the bottom status bar.
 func (a *App) Status() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.library == nil {
-		return map[string]any{
-			"ok":      false,
-			"message": "Couldn't find a Videos/ folder next to the app.",
-		}
-	}
-	return map[string]any{
-		"ok":         true,
+	out := map[string]any{
+		"ok":         a.library != nil,
 		"videosDir":  a.videosDir,
-		"channels":   len(a.library.Channels),
-		"videos":     a.library.TotalVideos(),
-		"totalBytes": a.library.TotalBytes(),
-		"totalSecs":  a.library.TotalSeconds(),
+		"driveRoot":  a.driveRoot,
+		"musicDir":   a.musicDir,
+		"channels":   0,
+		"videos":     0,
+		"totalBytes": int64(0),
+		"totalSecs":  float64(0),
+		"artists":    0,
+		"albums":     0,
+		"songs":      0,
+		"musicSecs":  float64(0),
+		"musicBytes": int64(0),
 	}
+	if a.library == nil {
+		out["message"] = "Couldn't find a Videos/ folder next to the app."
+		return out
+	}
+	out["channels"] = len(a.library.Channels)
+	out["videos"] = a.library.TotalVideos()
+	out["totalBytes"] = a.library.TotalBytes()
+	out["totalSecs"] = a.library.TotalSeconds()
+	if a.music != nil {
+		artists, albums, songs, dur, bytes := a.music.Stats()
+		out["artists"] = artists
+		out["albums"] = albums
+		out["songs"] = songs
+		out["musicSecs"] = dur
+		out["musicBytes"] = bytes
+	}
+	return out
 }
 
-// Channels returns the channel list (folders directly under Videos/).
+// Rescan rebuilds both the video and music libraries. Scan happens
+// outside the write lock so concurrent /video/, /thumb/, /audio/,
+// /art/ requests aren't blocked while we walk the filesystem.
+func (a *App) Rescan() {
+	a.mu.RLock()
+	videosDir := a.videosDir
+	musicDir := a.musicDir
+	a.mu.RUnlock()
+	if videosDir == "" {
+		return
+	}
+	lib := ScanLibrary(videosDir)
+	var music *MusicLibrary
+	if dirExists(musicDir) {
+		music = ScanMusicLibrary(musicDir)
+	}
+	a.mu.Lock()
+	a.library = lib
+	a.music = music
+	a.thumbWalkTag++
+	tag := a.thumbWalkTag
+	a.mu.Unlock()
+	go a.discoverThumbnails(tag)
+}
+
+// ---- Channel listing (subscription-aware) --------------------------------
+
+// Channels returns the channel list. For the Editor account we
+// return all channels; for other accounts we return only the channels
+// they're subscribed to.
 func (a *App) Channels() []ChannelInfo {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.library == nil {
+	lib := a.library
+	a.mu.RUnlock()
+	if lib == nil {
 		return []ChannelInfo{}
 	}
-	out := make([]ChannelInfo, 0, len(a.library.Channels))
-	for _, c := range a.library.Channels {
+	editor := a.accounts.isCurrentEditor()
+	currentID := a.accounts.currentID()
+	out := make([]ChannelInfo, 0, len(lib.Channels))
+	for _, c := range lib.Channels {
+		if !editor && !a.subs.isSubscribed(currentID, c.Name) {
+			continue
+		}
 		out = append(out, ChannelInfo{
 			Name:       c.Name,
 			VideoCount: c.totalVideoCount(),
@@ -212,14 +371,11 @@ func (a *App) Channels() []ChannelInfo {
 	return out
 }
 
-// Items returns the contents of a channel (when folderName == "") or
-// of a specific folder inside a channel. Folders and videos are
-// returned in a single A-Z sorted list keyed by their display name —
-// folders interleave with videos rather than grouping at the top, so
-// the column behaves like a Finder listing with no folder grouping.
-//
-// When folderName is non-empty, the result contains only videos
-// (folders never nest).
+// Items returns the contents of a channel root or a specific folder
+// inside a channel. Subscription gating is enforced by Channels()
+// upstream; if the user manages to call Items() on an unsubscribed
+// channel via direct API access we still serve it (Editor or not),
+// since the data isn't sensitive — just hidden from the UI.
 func (a *App) Items(channelName, folderName string) []Item {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -230,7 +386,6 @@ func (a *App) Items(channelName, folderName string) []Item {
 	if c == nil {
 		return []Item{}
 	}
-
 	if folderName != "" {
 		f := c.FolderByName(folderName)
 		if f == nil {
@@ -240,12 +395,9 @@ func (a *App) Items(channelName, folderName string) []Item {
 		for _, v := range f.Videos {
 			out = append(out, videoToItem(v))
 		}
-		// Already sorted at scan time, but the rule for the column is
-		// "always A-Z by display name" — re-sort defensively.
 		sortItems(out)
 		return out
 	}
-
 	out := make([]Item, 0, len(c.Videos)+len(c.Folders))
 	for _, f := range c.Folders {
 		out = append(out, Item{
@@ -262,28 +414,155 @@ func (a *App) Items(channelName, folderName string) []Item {
 	return out
 }
 
-// Rescan rebuilds the library from disk. The scan itself runs OUTSIDE
-// the write lock so concurrent /video/ and /thumb/ requests aren't
-// blocked while we walk the filesystem and decode every MP4 moov box —
-// only the swap of a.library is locked, which is constant-time.
-func (a *App) Rescan() {
+// AllChannels returns every channel in the library regardless of
+// subscriptions, plus a "subscribed" boolean per channel for the
+// current account. Used by the Manage Subscriptions UI.
+func (a *App) AllChannels() []ChannelSub {
 	a.mu.RLock()
-	dir := a.videosDir
+	lib := a.library
 	a.mu.RUnlock()
-	if dir == "" {
-		return
+	if lib == nil {
+		return []ChannelSub{}
 	}
-	lib := ScanLibrary(dir)
-
-	a.mu.Lock()
-	a.library = lib
-	a.thumbWalkTag++
-	tag := a.thumbWalkTag
-	a.mu.Unlock()
-	go a.discoverThumbnails(tag)
+	currentID := a.accounts.currentID()
+	editor := a.accounts.isCurrentEditor()
+	out := make([]ChannelSub, 0, len(lib.Channels))
+	for _, c := range lib.Channels {
+		out = append(out, ChannelSub{
+			Name:       c.Name,
+			VideoCount: c.totalVideoCount(),
+			Subscribed: editor || a.subs.isSubscribed(currentID, c.Name),
+		})
+	}
+	return out
 }
 
-// HasThumbnail reports whether a thumbnail exists for the given video.
+// ---- Account JS-callable -------------------------------------------------
+
+func (a *App) GetAccounts() []Account {
+	return a.accounts.list()
+}
+
+func (a *App) GetCurrentAccount() *Account {
+	id := a.accounts.currentID()
+	if id == "" {
+		return nil
+	}
+	if acct, ok := a.accounts.byID(id); ok {
+		return &acct
+	}
+	return nil
+}
+
+func (a *App) CreateAccount(username, colorA, colorB string, angle int) (Account, error) {
+	acct, err := a.accounts.create(username, colorA, colorB, angle)
+	if err != nil {
+		return Account{}, err
+	}
+	// On first-account creation from a fresh OR upgraded drive,
+	// auto-switch into the new account so the UI lands somewhere,
+	// AND import any pending v1 positions into this account (which
+	// completes the drive upgrade).
+	if a.accounts.currentID() == "" {
+		_ = a.accounts.switchTo(acct.ID)
+	}
+	a.completeV1MigrationIfNeeded(acct.ID)
+	a.editCap.invalidate()
+	a.refreshBootStateAfterAccountChange()
+	return acct, nil
+}
+
+func (a *App) DeleteAccount(id string) error {
+	if err := a.accounts.del(id); err != nil {
+		return err
+	}
+	a.editCap.invalidate()
+	a.refreshBootStateAfterAccountChange()
+	return nil
+}
+
+func (a *App) SwitchAccount(id string) error {
+	if err := a.accounts.switchTo(id); err != nil {
+		return err
+	}
+	a.editCap.invalidate()
+	a.refreshBootStateAfterAccountChange()
+	return nil
+}
+
+func (a *App) UpdateLastTab(tab string) error {
+	return a.accounts.updateLastTab(tab)
+}
+
+func (a *App) refreshBootStateAfterAccountChange() {
+	id := a.accounts.currentID()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if id == "" {
+		// Shouldn't happen on a normal switch, but if it does treat
+		// as first-account again.
+		a.bootStateField.State = "needs-first-account"
+		a.bootStateField.CurrentAccount = nil
+		return
+	}
+	if acct, ok := a.accounts.byID(id); ok {
+		a.bootStateField.State = "ready"
+		a.bootStateField.CurrentAccount = &acct
+	}
+}
+
+// ---- Subscription JS-callable --------------------------------------------
+
+func (a *App) Subscribe(channel string) error {
+	id := a.accounts.currentID()
+	if id == "" {
+		return errors.New("no active account")
+	}
+	if a.accounts.isCurrentEditor() {
+		return nil // editor sees everything; subscriptions are a no-op
+	}
+	return a.subs.subscribe(id, channel)
+}
+
+func (a *App) Unsubscribe(channel string) error {
+	id := a.accounts.currentID()
+	if id == "" {
+		return errors.New("no active account")
+	}
+	if a.accounts.isCurrentEditor() {
+		return nil
+	}
+	return a.subs.unsubscribe(id, channel)
+}
+
+// ---- Position JS-callable (per-account) ----------------------------------
+
+func (a *App) GetPosition(relPath string) float64 {
+	id := a.accounts.currentID()
+	if id == "" || a.positions == nil {
+		return 0
+	}
+	return a.positions.get(id, relPath)
+}
+
+func (a *App) SavePosition(relPath string, sec float64) error {
+	id := a.accounts.currentID()
+	if id == "" {
+		return errors.New("no active account")
+	}
+	return a.positions.set(id, relPath, sec)
+}
+
+func (a *App) ClearPosition(relPath string) error {
+	id := a.accounts.currentID()
+	if id == "" {
+		return nil
+	}
+	return a.positions.clear(id, relPath)
+}
+
+// ---- Thumbnail JS-callable -----------------------------------------------
+
 func (a *App) HasThumbnail(relPath string) bool {
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
@@ -292,20 +571,16 @@ func (a *App) HasThumbnail(relPath string) bool {
 	return a.thumbCached(abs)
 }
 
-// FetchThumbnailFromYouTube downloads the YouTube thumbnail for the
-// given URL or bare video ID and saves it for `relPath`.
-//
-// Accepts: full YouTube URLs (youtube.com/watch?v=..., youtu.be/...,
-// shorts), bare 11-char IDs, or filename-style "[ID].mp4" patterns.
 func (a *App) FetchThumbnailFromYouTube(relPath string, urlOrID string) error {
+	if !a.accounts.isCurrentEditor() {
+		return errEditorOnly
+	}
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
 		return err
 	}
 	id := extractYouTubeID(urlOrID)
 	if id == "" {
-		// Last try: maybe the user pasted nothing useful but the
-		// filename itself contains the ID in brackets.
 		id = extractYouTubeID(filepath.Base(relPath))
 	}
 	if id == "" {
@@ -318,9 +593,10 @@ func (a *App) FetchThumbnailFromYouTube(relPath string, urlOrID string) error {
 	return a.writeThumb(abs, data)
 }
 
-// ImportThumbnailFromFile copies an image file from disk into the
-// thumb cache for `relPath`. Used by the "Choose file..." UI button.
 func (a *App) ImportThumbnailFromFile(relPath string, filePath string) error {
+	if !a.accounts.isCurrentEditor() {
+		return errEditorOnly
+	}
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
 		return err
@@ -335,34 +611,32 @@ func (a *App) ImportThumbnailFromFile(relPath string, filePath string) error {
 	return a.writeThumb(abs, data)
 }
 
-// ClearThumbnail removes the cached thumbnail so the placeholder
-// shows again. Useful for "remove thumbnail" UI.
 func (a *App) ClearThumbnail(relPath string) error {
+	if !a.accounts.isCurrentEditor() {
+		return errEditorOnly
+	}
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
 		return err
 	}
 	key := thumbKey(abs)
-
 	a.mu.Lock()
 	delete(a.memThumbs, key)
 	dir := a.videosDir
 	a.mu.Unlock()
-
 	if dir != "" {
 		_ = os.Remove(filepath.Join(dir, ".thumbs", key+".jpg"))
 	}
 	return nil
 }
 
-// ---- internal helpers -----------------------------------------------------
+// errEditorOnly is the sentinel returned when a non-editor account
+// tries to mutate the library. The frontend renders the error via
+// the existing modal-status text path.
+var errEditorOnly = errors.New("only the Editor account can do that")
 
-// absVideoPath resolves a slash-separated relative path under Videos/
-// to an absolute path on disk. Rejects paths that escape Videos/ via
-// "../" segments or via symlinks pointing outside the library — every
-// CRUD path on the App goes through this, so it's the chokepoint for
-// path-traversal defense on the JS-bindings side (the asset server's
-// safeJoin is the equivalent for HTTP-side paths).
+// ---- internal helpers ----------------------------------------------------
+
 func (a *App) absVideoPath(relPath string) (string, error) {
 	a.mu.RLock()
 	dir := a.videosDir
@@ -373,16 +647,22 @@ func (a *App) absVideoPath(relPath string) (string, error) {
 	return safeJoin(dir, relPath)
 }
 
-// thumbCached reports whether a thumbnail is cached on disk or in
-// memory for the given absolute video path.
+func (a *App) absMusicPath(relPath string) (string, error) {
+	a.mu.RLock()
+	dir := a.musicDir
+	a.mu.RUnlock()
+	if dir == "" {
+		return "", errors.New("music library not loaded")
+	}
+	return safeJoin(dir, relPath)
+}
+
 func (a *App) thumbCached(absPath string) bool {
 	key := thumbKey(absPath)
-
 	a.mu.RLock()
 	dir := a.videosDir
 	_, inMem := a.memThumbs[key]
 	a.mu.RUnlock()
-
 	if inMem {
 		return true
 	}
@@ -394,9 +674,6 @@ func (a *App) thumbCached(absPath string) bool {
 	return false
 }
 
-// writeThumb persists thumbnail bytes for the given absolute video
-// path. Tries Videos/.thumbs/<key>.jpg first, falls back to in-memory
-// cache if the directory isn't writable (read-only USB).
 func (a *App) writeThumb(absPath string, data []byte) error {
 	a.mu.RLock()
 	dir := a.videosDir
@@ -404,9 +681,7 @@ func (a *App) writeThumb(absPath string, data []byte) error {
 	if dir == "" {
 		return errors.New("library not loaded")
 	}
-
 	key := thumbKey(absPath)
-
 	thumbsDir := filepath.Join(dir, ".thumbs")
 	if err := os.MkdirAll(thumbsDir, 0o755); err == nil {
 		path := filepath.Join(thumbsDir, key+".jpg")
@@ -414,7 +689,6 @@ func (a *App) writeThumb(absPath string, data []byte) error {
 			return nil
 		}
 	}
-
 	a.mu.Lock()
 	a.memThumbs[key] = data
 	a.mu.Unlock()
@@ -431,7 +705,12 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// ---- DTOs (these become the TS/JS types Wails generates) ------------------
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// ---- DTOs ----------------------------------------------------------------
 
 type ChannelInfo struct {
 	Name       string  `json:"name"`
@@ -439,18 +718,21 @@ type ChannelInfo struct {
 	TotalSecs  float64 `json:"totalSecs"`
 }
 
-// Item is the discriminated row type returned by Items(). The frontend
-// switches on Kind ("folder" | "video") to decide how to render and
-// what action to take on click.
+type ChannelSub struct {
+	Name       string `json:"name"`
+	VideoCount int    `json:"videoCount"`
+	Subscribed bool   `json:"subscribed"`
+}
+
 type Item struct {
-	Kind string `json:"kind"` // "folder" or "video"
-	Name string `json:"name"` // folder name OR video title
+	Kind string `json:"kind"`
+	Name string `json:"name"`
 
 	// folder fields
 	VideoCount int     `json:"videoCount,omitempty"`
 	TotalSecs  float64 `json:"totalSecs,omitempty"`
 
-	// video fields (TotalSecs above doubles as the video duration)
+	// video fields (TotalSecs above doubles as video duration)
 	Channel   string `json:"channel,omitempty"`
 	Folder    string `json:"folder,omitempty"`
 	RelPath   string `json:"relPath,omitempty"`
@@ -473,10 +755,64 @@ func videoToItem(v *Video) Item {
 	}
 }
 
-// sortItems sorts an Item slice case-insensitively by display name, so
-// folders and videos interleave alphabetically.
 func sortItems(items []Item) {
 	sort.SliceStable(items, func(i, j int) bool {
 		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 	})
+}
+
+// ---- drive root discovery ------------------------------------------------
+
+// findDriveRoot walks up from the binary location to find the
+// directory that contains either a Videos/ subfolder OR a .data/
+// subfolder. v1 drives only have the former; v2 drives have both.
+// Falls back to the binary's directory if neither is found, so a
+// fresh launch on an empty drive can still create them.
+func findDriveRoot() (string, error) {
+	check := func(dir string) bool {
+		if dir == "" {
+			return false
+		}
+		return dirExists(filepath.Join(dir, "Videos")) ||
+			dirExists(filepath.Join(dir, ".data"))
+	}
+
+	// AppImage: $APPIMAGE points at the .AppImage file itself.
+	if appimage := os.Getenv("APPIMAGE"); appimage != "" {
+		dir := filepath.Dir(appimage)
+		if check(dir) {
+			return dir, nil
+		}
+	}
+
+	exe, err := os.Executable()
+	if err == nil {
+		if resolved, err2 := filepath.EvalSymlinks(exe); err2 == nil {
+			exe = resolved
+		}
+		dir := filepath.Dir(exe)
+		for i := 0; i < 5; i++ {
+			if check(dir) {
+				return dir, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+		// Nothing matched — return the binary's own directory so we
+		// can create Videos/ + .data/ there. This is the "fresh
+		// drive, just plopped the binary on it" path.
+		return filepath.Dir(exe), nil
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		if check(cwd) {
+			return cwd, nil
+		}
+		return cwd, nil
+	}
+
+	return "", errors.New("couldn't determine drive root")
 }

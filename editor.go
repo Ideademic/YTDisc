@@ -207,6 +207,9 @@ func checkOnline() bool {
 
 // CreateChannel creates a new (empty) channel folder under Videos/.
 func (a *App) CreateChannel(name string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	name = strings.TrimSpace(name)
 	if err := validateChannelName(name); err != nil {
 		return err
@@ -233,6 +236,9 @@ func (a *App) CreateChannel(name string) error {
 // RenameChannel renames a channel folder and migrates the thumbnail
 // cache (which is keyed by absolute path).
 func (a *App) RenameChannel(oldName, newName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	newName = strings.TrimSpace(newName)
 	if err := validateChannelName(newName); err != nil {
 		return err
@@ -270,12 +276,18 @@ func (a *App) RenameChannel(oldName, newName string) error {
 		return err
 	}
 	a.migrateCacheForChannelRename(oldPaths, oldDir, newDir)
+	a.subs.renameChannel(oldName, newName)
 	a.Rescan()
 	return nil
 }
 
 // DeleteChannel moves the channel folder to .trash/ within Videos/.
 func (a *App) DeleteChannel(name string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
+	// Drop subscriptions to this channel from every loaded account.
+	defer a.subs.removeChannel(name)
 	a.mu.RLock()
 	dir := a.videosDir
 	a.mu.RUnlock()
@@ -293,12 +305,26 @@ func (a *App) DeleteChannel(name string) error {
 	return nil
 }
 
+// requireEditor returns errEditorOnly if the current account is not
+// the Editor singleton. Every library-mutating method calls this
+// first so non-editor accounts get a uniform error rather than
+// silently corrupting state. errEditorOnly is defined in app.go.
+func (a *App) requireEditor() error {
+	if a.accounts == nil || !a.accounts.isCurrentEditor() {
+		return errEditorOnly
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Folder CRUD (folders live one level inside a channel)
 // ---------------------------------------------------------------------------
 
 // CreateFolder creates an (empty) folder inside the named channel.
 func (a *App) CreateFolder(channelName, folderName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	folderName = strings.TrimSpace(folderName)
 	if err := validateChannelName(folderName); err != nil {
 		return err
@@ -329,6 +355,9 @@ func (a *App) CreateFolder(channelName, folderName string) error {
 // RenameFolder renames a folder inside the named channel and migrates
 // the thumbnail cache for every video inside it.
 func (a *App) RenameFolder(channelName, oldName, newName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	newName = strings.TrimSpace(newName)
 	if err := validateChannelName(newName); err != nil {
 		return err
@@ -372,6 +401,9 @@ func (a *App) RenameFolder(channelName, oldName, newName string) error {
 
 // DeleteFolder moves the folder + everything inside it to .trash.
 func (a *App) DeleteFolder(channelName, folderName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	a.mu.RLock()
 	dir := a.videosDir
 	a.mu.RUnlock()
@@ -395,6 +427,9 @@ func (a *App) DeleteFolder(channelName, folderName string) error {
 // would occur in the channel root, that one video is skipped (the user
 // gets a sensible error and can resolve the collision manually).
 func (a *App) EmptyFolder(channelName, folderName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	a.mu.RLock()
 	dir := a.videosDir
 	lib := a.library
@@ -457,6 +492,9 @@ func (a *App) EmptyFolder(channelName, folderName string) error {
 // video to the channel root. Cross-channel moves aren't supported here —
 // keep it simple; the user can rename the channel separately if needed.
 func (a *App) MoveVideo(relPath, destFolder string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
 		return err
@@ -521,6 +559,9 @@ func (a *App) MoveVideo(relPath, destFolder string) error {
 // extension; the existing extension is preserved. Sidecar images and
 // thumbnail cache are migrated too.
 func (a *App) RenameVideo(relPath, newTitle string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	newTitle = strings.TrimSpace(newTitle)
 	if err := validateFileName(newTitle); err != nil {
 		return err
@@ -563,6 +604,9 @@ func (a *App) RenameVideo(relPath, newTitle string) error {
 // DeleteVideo moves a video and its sidecars to .trash/, and clears
 // the thumbnail cache entry.
 func (a *App) DeleteVideo(relPath string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	abs, err := a.absVideoPath(relPath)
 	if err != nil {
 		return err
@@ -594,7 +638,9 @@ func (a *App) DeleteVideo(relPath string) error {
 	a.mu.Unlock()
 	_ = os.Remove(filepath.Join(dir, ".thumbs", key+".jpg"))
 	if a.positions != nil {
-		_ = a.positions.clear(filepath.ToSlash(relPath))
+		// Drop the bookmark from every loaded account so a deleted
+		// file doesn't linger in anyone's resume map.
+		a.positions.clearAcrossAccounts(filepath.ToSlash(relPath))
 	}
 
 	a.Rescan()
@@ -620,6 +666,9 @@ func (a *App) DeleteVideo(relPath string) error {
 // Wails event. Returns when the entire batch completes (or on first
 // error).
 func (a *App) AddVideos(channelName, destFolder string, urls []string, quality string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
 	cap := a.GetEditCapability()
 	if !cap.Enabled {
 		return errors.New(cap.Reason)
@@ -1108,13 +1157,15 @@ func (a *App) migrateThumbCache(oldAbs, newAbs string) {
 		a.mu.Unlock()
 	}
 
-	// Migrate resume bookmark if present. Both rels are forward-slash
-	// paths relative to Videos/ — that's what positionStore is keyed on.
+	// Migrate resume bookmark if present. Apply across every loaded
+	// account so each user's bookmark for the renamed file follows
+	// the file. Cold accounts (never accessed this session) are
+	// reconciled at next-load time.
 	if a.positions != nil {
 		oldRel, err1 := filepath.Rel(dir, oldAbs)
 		newRel, err2 := filepath.Rel(dir, newAbs)
 		if err1 == nil && err2 == nil {
-			a.positions.rename(filepath.ToSlash(oldRel), filepath.ToSlash(newRel))
+			a.positions.renameAcrossAccounts(filepath.ToSlash(oldRel), filepath.ToSlash(newRel))
 		}
 	}
 }

@@ -1,55 +1,68 @@
 # YTDisc
 
-**A portable YouTube library that lives on a thumb drive.** Drop a
-single binary onto any USB stick or SD card next to a `Videos/`
-folder, plug it into any Mac / Windows / Linux machine, and double-
-click. You get a Finder-style three-column browser with full playback
-and (optional) library editing via yt-dlp — no install, no settings
-to tweak per machine, nothing left behind on the host.
+**A portable YouTube + YouTube Music library that lives on a thumb
+drive.** Drop a single binary onto any USB stick or SD card alongside
+your `Videos/` and `Music/` folders, plug it into any Mac / Windows /
+Linux machine, and double-click. You get a tabbed Finder-style
+browser with full playback, multiple-account support, and (optional)
+library editing via yt-dlp — no install, no settings to tweak per
+machine, nothing left behind on the host.
 
 ```
 📁 USB-stick/
 ├── YTDisc.app          ← (or YTDisc.exe / YTDisc-x86_64.AppImage)
-└── Videos/
-    ├── Channel A/
-    │   ├── Video 1.mp4
-    │   └── Video 2.mp4
-    └── Channel B/
-        ├── My playlist/
-        │   ├── 001 - First.mp4
-        │   └── 002 - Second.mp4
-        └── Video 3.mp4
+├── .data/              ← accounts, playlists, watch progress
+├── Videos/
+│   ├── Channel A/Video 1.mp4
+│   └── Channel B/My playlist/001 - First.mp4
+└── Music/
+    └── Artist/Album/01 - Track.m4a (+ optional .mp4 music video)
 ```
 
-The whole library — videos, thumbnails, resume bookmarks — lives
-inside `Videos/`, so unplugging the stick takes the entire setup with
-it. Nothing is written outside that folder.
+The whole library — videos, music, thumbnails, accounts, playlists,
+resume bookmarks — lives inside the drive. Unplugging it takes the
+entire setup with you. Nothing is written outside.
 
 ## Features
 
-- Three-column UI: channels → videos → detail with thumbnail and play
-- Native HTML5 `<video>` playback with full controls and fullscreen
-- **Folders** inside channels (one level deep, A-Z interleaved with videos)
-- **Resume playback** — closing a video saves your position; opening it
-  again jumps back. Skipped if you're in the first 45 s or last 20 s.
-  Bookmarks live in `Videos/.state.json` and travel with the library.
+### Three tabs
+- **Accounts** — multiple per-account profiles with conic-gradient
+  avatars. Each account has their own watch progress, playlists, and
+  channel subscriptions. The built-in **Editor** account is the only
+  one that can mutate the library (add/rename/delete content).
+- **Videos** — Finder-style channels → folders → videos browser with
+  per-account channel subscriptions (non-Editor accounts only see
+  channels they've subscribed to).
+- **Music** — Artists → Albums → Songs, with album art, queue,
+  shuffle, full-screen popout player, and optional music videos
+  attached to songs.
+
+### Videos
+- Native HTML5 playback with full controls and fullscreen
+- Folders inside channels (one level deep, A-Z interleaved)
+- **Resume playback** per account — skipped in the first 45 s / last 20 s
 - **Playlist downloads** — paste a YouTube playlist URL, get a folder
-  with every entry pre-numbered in playlist order
-- **Quality selection** — FHD (1080p) / HD (720p) / SD (480p)
-- Thumbnail discovery (in priority order):
-  1. Embedded MP4 cover art
-  2. Sidecar image: `{name}.jpg`/`.jpeg`/`.png`/`.webp` next to the video
-  3. Manual fetch from YouTube via paste-URL (no API key)
-  4. Manual import from local image file
-- Optional edit mode (just needs an internet connection — yt-dlp ships
-  embedded, ffmpeg is no longer required):
-  - Add / rename / delete channels and folders
-  - Add videos and playlists by pasting YouTube URLs
-  - Move videos between folders
-  - Empty a folder (keeps the videos at the channel root) or delete
-    it (sends it to `.trash` along with everything inside)
-  - Rename / delete videos
-  - Deletes go to `Videos/.trash/` — recoverable until you empty it
+  with every entry numbered in playlist order
+- Quality selection — FHD (1080p) / HD (720p) / SD (480p)
+- Thumbnail discovery: embedded cover art → sidecar image → YouTube
+  fetch (no API key) → manual import
+
+### Music
+- Album art via sidecar images or yt-dlp `--write-thumbnail`
+- Queue, shuffle, shuffle-from-album
+- Pop-out full-screen player
+- **Music videos** as a sidecar `.mp4` next to a song's `.m4a` —
+  attach by pasting a YouTube URL while in Editor mode
+- **Playlists** with three visibility levels: private, shared
+  read-only, or shared read-write (collaborative)
+
+### Edit mode (Editor account only)
+- Add / rename / delete channels, folders, videos, songs, albums
+- Add videos via YouTube URLs (single videos or playlists)
+- Add music via YouTube Music URLs (songs or albums)
+- Pre-download manifest with per-item progress bars
+- Move videos between folders, manage subscriptions
+- All deletes go to a `.trash/` directory — recoverable
 
 ## Install (the USB-stick way)
 
@@ -81,11 +94,18 @@ app doesn't care. The portable design just means it doesn't have to.
 **No external tools required.** yt-dlp ships inside the app and
 self-extracts into `Videos/.bin/` on first use, so it travels with
 your USB stick. The video+audio stream merge that previously needed
-ffmpeg is now done by a pure-Go MP4 muxer baked into YTDisc itself.
+ffmpeg is done by a pure-Go MP4 muxer baked into YTDisc itself.
 
-Edit mode just needs an internet connection. If you're offline the
-edit toggle shows "No internet connection" — click it to re-check
-after reconnecting; no app restart needed.
+Edit mode just needs an internet connection AND being logged in as
+the Editor account.
+
+## Upgrading from v1
+
+v2 detects v1 drives (those with a `Videos/.state.json` and no
+`.data/` folder) and prompts you with an "Upgrade" or "Quit" dialog.
+The upgrade is one-way: v1 binaries can't read the v2 layout. If you
+want to keep using v1, just keep using the v1 binary — your data is
+safe either way.
 
 ## Building from source
 

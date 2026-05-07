@@ -6,53 +6,129 @@
     <title>YTDisc</title>
     <link rel="stylesheet" href="src/style.css" />
   </head>
-  <body>
+  <body data-tab="videos">
     <main id="app">
-      <!-- Three Finder-style columns. JS populates them. -->
-      <section class="col col-channels" aria-label="Channels">
-        <header class="col-header">
-          <span>Channels</span>
-          <button
-            class="add-btn edit-only"
-            id="add-channel-btn"
-            title="New channel"
-            aria-label="Add channel"
-          >+</button>
-        </header>
-        <ul id="channel-list" class="list"></ul>
+      <!-- Tab strip on the very left, replacing the bottom status bar
+           in v1. The active tab swaps the right-hand columns. -->
+      <nav class="tabs">
+        <button class="tab" data-tab="accounts" aria-label="Accounts">
+          <span class="tab-icon">👤</span>
+          <span class="tab-label">Accounts</span>
+        </button>
+        <button class="tab" data-tab="videos" aria-label="Videos">
+          <span class="tab-icon">▶</span>
+          <span class="tab-label">Videos</span>
+        </button>
+        <button class="tab" data-tab="music" aria-label="Music">
+          <span class="tab-icon">♪</span>
+          <span class="tab-label">Music</span>
+        </button>
+        <div class="tab-spacer"></div>
+        <button class="tab tab-current-account" id="current-account-chip" aria-label="Current account">
+          <span class="profile-pic profile-pic-sm" id="chip-profile-pic"></span>
+          <span class="tab-label" id="chip-username">…</span>
+        </button>
+      </nav>
+
+      <!-- VIDEOS tab — the v1 three-column browser, plus a Manage
+           Subscriptions affordance at the bottom of the channels
+           column. When manage-subs mode is active, columns 2+3 swap
+           to a checkbox-list view of every channel. -->
+      <section class="tab-content" data-tab-content="videos">
+        <section class="col col-channels" aria-label="Channels">
+          <header class="col-header">
+            <span>Channels</span>
+            <span class="col-header-actions">
+              <button
+                class="add-btn editor-only"
+                id="add-channel-btn"
+                title="New channel"
+                aria-label="Add channel"
+              >+</button>
+            </span>
+          </header>
+          <ul id="channel-list" class="list"></ul>
+          <button id="manage-subs-btn" class="col-footer-btn">Manage Subscriptions</button>
+        </section>
+
+        <section class="col col-videos" aria-label="Videos">
+          <header class="col-header">
+            <span id="videos-header">Videos</span>
+            <span class="col-header-actions">
+              <button class="add-btn editor-only" id="add-folder-btn" title="New folder">📁</button>
+              <button class="add-btn editor-only" id="add-video-btn" title="Add videos">+</button>
+            </span>
+          </header>
+          <ul id="video-list" class="list"></ul>
+        </section>
+
+        <section class="col col-detail" aria-label="Details">
+          <div id="detail" class="detail-empty"><p>Select a video</p></div>
+        </section>
+
+        <!-- "Manage subscriptions" view layered over col 2+3 when
+             active. Editor sees this with all-channels-checked since
+             Editor is implicitly subscribed to everything. -->
+        <section id="subs-view" class="subs-view hidden">
+          <header class="col-header">
+            <span>Manage subscriptions</span>
+            <button class="modal-close" id="subs-close" aria-label="Done">✓</button>
+          </header>
+          <ul id="subs-list" class="list"></ul>
+        </section>
       </section>
 
-      <section class="col col-videos" aria-label="Videos">
-        <header class="col-header">
-          <span id="videos-header">Videos</span>
-          <span class="col-header-actions">
-            <button
-              class="add-btn edit-only"
-              id="add-folder-btn"
-              title="New folder"
-              aria-label="Add folder"
-            >📁</button>
-            <button
-              class="add-btn edit-only"
-              id="add-video-btn"
-              title="Add videos via yt-dlp"
-              aria-label="Add videos"
-            >+</button>
-          </span>
-        </header>
-        <ul id="video-list" class="list"></ul>
+      <!-- ACCOUNTS tab — accounts list on the left, library stats on
+           the right. -->
+      <section class="tab-content hidden" data-tab-content="accounts">
+        <section class="col col-channels" aria-label="Accounts">
+          <header class="col-header">
+            <span>Accounts</span>
+            <button class="add-btn" id="add-account-btn" title="Create account" aria-label="Create account">+</button>
+          </header>
+          <ul id="accounts-list" class="list"></ul>
+        </section>
+
+        <section class="col col-stats" aria-label="Library stats">
+          <div class="stats-panel" id="stats-panel"></div>
+        </section>
       </section>
 
-      <section class="col col-detail" aria-label="Details">
-        <div id="detail" class="detail-empty">
-          <p>Select a video</p>
-        </div>
+      <!-- MUSIC tab — artists with albums (folder-style) → songs → now-playing. -->
+      <section class="tab-content hidden" data-tab-content="music">
+        <section class="col col-channels" aria-label="Artists">
+          <header class="col-header">
+            <span>Artists</span>
+            <span class="col-header-actions">
+              <button class="add-btn editor-only" id="add-music-btn" title="Add music" aria-label="Add music">+</button>
+            </span>
+          </header>
+          <ul id="artist-list" class="list"></ul>
+          <button id="playlists-btn" class="col-footer-btn">Playlists</button>
+        </section>
+
+        <section class="col col-videos" aria-label="Songs">
+          <header class="col-header">
+            <span id="songs-header">Songs</span>
+          </header>
+          <div class="album-controls hidden" id="album-controls">
+            <button class="album-btn" id="play-album-btn">▶ Play Album</button>
+            <button class="album-btn" id="shuffle-album-btn">🔀 Shuffle Album</button>
+          </div>
+          <ul id="song-list" class="list"></ul>
+        </section>
+
+        <section class="col col-detail col-now-playing" aria-label="Now playing">
+          <div id="now-playing" class="now-playing-empty">
+            <p>Nothing playing</p>
+          </div>
+        </section>
       </section>
 
-      <!-- Player overlay; hidden until Play is clicked. The X close
-           and title overlay are siblings of the <video>, so when the
-           video itself enters fullscreen they're not visible (only
-           the fullscreened element shows). -->
+      <!-- ============== PLAYER OVERLAYS ============== -->
+
+      <!-- Shared video player (used for regular videos AND music
+           videos). Same overlay as v1. -->
       <div id="player" class="player hidden">
         <div class="player-controls">
           <button id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen (f)">⛶</button>
@@ -62,7 +138,121 @@
         <div id="player-title"></div>
       </div>
 
-      <!-- "Set thumbnail" modal -->
+      <!-- Music popout — fills the whole window with the now-playing
+           view when the user clicks the expand button. Same close-X
+           pattern as the video player overlay. -->
+      <div id="music-popout" class="music-popout hidden">
+        <button id="music-popout-close" class="popout-close" aria-label="Close" title="Close (esc)">×</button>
+        <div id="music-popout-body"></div>
+      </div>
+
+      <!-- ============== BOOT MODALS ============== -->
+
+      <!-- v1→v2 drive upgrade prompt. Two buttons: Upgrade and Quit.
+           Backdrop is non-dismissable; user MUST pick one. -->
+      <div id="upgrade-modal" class="modal hidden modal-blocking">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2>Upgrade this drive to v2?</h2>
+          </header>
+          <div class="modal-body">
+            <p>
+              This drive was set up with YTDisc v1. v2 introduces accounts,
+              music, and other features that require a new on-disk layout
+              (a <code>.data</code> folder next to <code>Videos</code> and
+              <code>Music</code>).
+            </p>
+            <p class="modal-hint">
+              <b>The upgrade is one-way.</b> If you'd rather keep this drive
+              compatible with v1, quit and use the v1 binary instead — it
+              still works fine.
+            </p>
+            <div class="modal-row">
+              <button id="upgrade-accept" class="primary">Upgrade</button>
+              <button id="upgrade-quit" class="danger">Quit</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- First-account creation modal. Shown either on a fresh drive
+           or right after the v1→v2 upgrade. -->
+      <div id="first-account-modal" class="modal hidden modal-blocking">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2 id="first-account-title">Create your account</h2>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint">
+              Accounts keep your watch progress, playlists, and channel
+              subscriptions separate from anyone else who uses this drive.
+              You can create more later.
+            </p>
+            <label class="form-label">Username
+              <input type="text" id="first-account-name" autocomplete="off" spellcheck="false" maxlength="64" />
+            </label>
+            <label class="form-label">Profile picture (conic gradient)</label>
+            <div class="profile-form">
+              <div class="profile-preview profile-pic" id="first-account-preview"></div>
+              <div class="profile-controls">
+                <label class="form-inline">Color A
+                  <input type="color" id="first-account-colorA" value="#e85d7a" />
+                </label>
+                <label class="form-inline">Color B
+                  <input type="color" id="first-account-colorB" value="#1a1310" />
+                </label>
+                <label class="form-inline">Angle
+                  <input type="range" id="first-account-angle" min="0" max="359" value="45" />
+                  <output id="first-account-angle-out">45°</output>
+                </label>
+              </div>
+            </div>
+            <p class="modal-hint modal-status" id="first-account-status"></p>
+            <div class="modal-row">
+              <button id="first-account-save" class="primary">Create account</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add-account modal (after the first one — same fields, no
+           welcome copy). -->
+      <div id="add-account-modal" class="modal hidden">
+        <div class="modal-card">
+          <header class="modal-header">
+            <h2>New account</h2>
+            <button class="modal-close" id="add-account-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <label class="form-label">Username
+              <input type="text" id="add-account-name" autocomplete="off" spellcheck="false" maxlength="64" />
+            </label>
+            <div class="profile-form">
+              <div class="profile-preview profile-pic" id="add-account-preview"></div>
+              <div class="profile-controls">
+                <label class="form-inline">Color A
+                  <input type="color" id="add-account-colorA" value="#7a8de8" />
+                </label>
+                <label class="form-inline">Color B
+                  <input type="color" id="add-account-colorB" value="#1a1310" />
+                </label>
+                <label class="form-inline">Angle
+                  <input type="range" id="add-account-angle" min="0" max="359" value="120" />
+                  <output id="add-account-angle-out">120°</output>
+                </label>
+              </div>
+            </div>
+            <p class="modal-hint modal-status" id="add-account-status"></p>
+            <div class="modal-row">
+              <button id="add-account-save" class="primary">Create</button>
+              <button id="add-account-cancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============== EXISTING MODALS (videos tab) ============== -->
+
       <div id="thumb-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -72,13 +262,7 @@
           <div class="modal-body">
             <p class="modal-hint">Paste a YouTube link or video ID:</p>
             <div class="modal-row">
-              <input
-                type="text"
-                id="thumb-url-input"
-                placeholder="https://youtu.be/dQw4w9WgXcQ"
-                autocomplete="off"
-                spellcheck="false"
-              />
+              <input type="text" id="thumb-url-input" placeholder="https://youtu.be/dQw4w9WgXcQ" autocomplete="off" spellcheck="false" />
               <button id="thumb-fetch-btn" class="primary">Fetch</button>
             </div>
             <p class="modal-hint modal-status" id="thumb-modal-status"></p>
@@ -95,7 +279,6 @@
         </div>
       </div>
 
-      <!-- "Add channel" modal -->
       <div id="channel-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -105,13 +288,7 @@
           <div class="modal-body">
             <p class="modal-hint">Channel name (this becomes the folder name under Videos/).</p>
             <div class="modal-row">
-              <input
-                type="text"
-                id="channel-name-input"
-                placeholder="Channel name"
-                autocomplete="off"
-                spellcheck="false"
-              />
+              <input type="text" id="channel-name-input" placeholder="Channel name" autocomplete="off" spellcheck="false" />
             </div>
             <p class="modal-hint modal-status" id="channel-modal-status"></p>
             <div class="modal-row">
@@ -122,46 +299,6 @@
         </div>
       </div>
 
-      <!-- "Add videos" modal -->
-      <div id="addvideo-modal" class="modal hidden">
-        <div class="modal-card modal-card-wide">
-          <header class="modal-header">
-            <h2>Add videos to <span id="addvideo-target"></span></h2>
-            <button class="modal-close" id="addvideo-close" aria-label="Close">×</button>
-          </header>
-          <div class="modal-body">
-            <p class="modal-hint">
-              Paste one or more YouTube URLs (one per line). Playlist
-              links create a new folder under the channel and download
-              every entry into it.
-            </p>
-            <textarea
-              id="addvideo-urls"
-              rows="6"
-              placeholder="https://youtu.be/dQw4w9WgXcQ&#10;https://www.youtube.com/playlist?list=PL…"
-              spellcheck="false"
-            ></textarea>
-            <div class="modal-row modal-row-inline">
-              <label for="addvideo-quality" class="inline-label">Quality:</label>
-              <select id="addvideo-quality">
-                <option value="fhd" selected>FHD (1080p)</option>
-                <option value="hd">HD (720p)</option>
-                <option value="sd">SD (480p)</option>
-              </select>
-            </div>
-            <div id="addvideo-progress" class="addvideo-progress hidden">
-              <div class="progress-summary" id="addvideo-summary"></div>
-              <pre class="progress-log" id="addvideo-log"></pre>
-            </div>
-            <div class="modal-row">
-              <button id="addvideo-start" class="primary">Start downloading</button>
-              <button id="addvideo-cancel">Close</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- "New folder" modal -->
       <div id="folder-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -171,13 +308,7 @@
           <div class="modal-body">
             <p class="modal-hint">Folders group videos within a channel. They can't be nested inside other folders.</p>
             <div class="modal-row">
-              <input
-                type="text"
-                id="folder-name-input"
-                placeholder="Folder name"
-                autocomplete="off"
-                spellcheck="false"
-              />
+              <input type="text" id="folder-name-input" placeholder="Folder name" autocomplete="off" spellcheck="false" />
             </div>
             <p class="modal-hint modal-status" id="folder-modal-status"></p>
             <div class="modal-row">
@@ -188,7 +319,6 @@
         </div>
       </div>
 
-      <!-- "Move video to folder" modal -->
       <div id="move-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -206,7 +336,6 @@
         </div>
       </div>
 
-      <!-- "Rename" modal (shared between channel and video rename) -->
       <div id="rename-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -216,12 +345,7 @@
           <div class="modal-body">
             <p class="modal-hint" id="rename-modal-hint"></p>
             <div class="modal-row">
-              <input
-                type="text"
-                id="rename-input"
-                autocomplete="off"
-                spellcheck="false"
-              />
+              <input type="text" id="rename-input" autocomplete="off" spellcheck="false" />
             </div>
             <p class="modal-hint modal-status" id="rename-status"></p>
             <div class="modal-row">
@@ -232,9 +356,6 @@
         </div>
       </div>
 
-      <!-- "Confirm" modal — used for delete-channel, delete-video,
-           delete-folder, and empty-folder. Buttons are reconfigured
-           per-use by the JS that opens the modal. -->
       <div id="confirm-modal" class="modal hidden">
         <div class="modal-card">
           <header class="modal-header">
@@ -244,8 +365,7 @@
           <div class="modal-body">
             <p id="confirm-message"></p>
             <p class="modal-hint" id="confirm-hint">
-              Moves to <code>Videos/.trash/</code> — recoverable until you delete
-              that folder manually.
+              Moves to <code>.trash/</code> — recoverable until you delete that folder manually.
             </p>
             <div class="modal-row">
               <button id="confirm-yes" class="danger-primary">Move to trash</button>
@@ -256,11 +376,48 @@
         </div>
       </div>
 
-      <!-- Status bar with edit toggle. -->
-      <div id="status-bar">
-        <span id="status-stats"></span>
-        <button id="edit-toggle" class="edit-toggle">Loading…</button>
+      <!-- Add-videos / add-music / add-music-video modal. Now with a
+           pre-fetch manifest list rendered above the textarea so the
+           user sees what's about to be downloaded with per-item
+           progress bars during download. -->
+      <div id="addvideo-modal" class="modal hidden">
+        <div class="modal-card modal-card-wide">
+          <header class="modal-header">
+            <h2 id="addvideo-modal-title">Add videos</h2>
+            <button class="modal-close" id="addvideo-close" aria-label="Close">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="modal-hint" id="addvideo-hint">
+              Paste one or more YouTube URLs (one per line). Playlist
+              links create a new folder under the channel and download
+              every entry into it.
+            </p>
+            <textarea id="addvideo-urls" rows="5"
+              placeholder="https://youtu.be/dQw4w9WgXcQ&#10;https://www.youtube.com/playlist?list=PL…"
+              spellcheck="false"></textarea>
+            <div class="modal-row modal-row-inline" id="addvideo-quality-row">
+              <label for="addvideo-quality" class="inline-label">Quality:</label>
+              <select id="addvideo-quality">
+                <option value="fhd" selected>FHD (1080p)</option>
+                <option value="hd">HD (720p)</option>
+                <option value="sd">SD (480p)</option>
+              </select>
+            </div>
+            <div class="modal-row">
+              <button id="addvideo-fetch" class="primary">List items</button>
+            </div>
+            <ul id="addvideo-manifest" class="manifest-list hidden"></ul>
+            <div class="modal-row">
+              <button id="addvideo-start" class="primary hidden">Start downloading</button>
+              <button id="addvideo-cancel">Close</button>
+            </div>
+            <pre class="progress-log hidden" id="addvideo-log"></pre>
+          </div>
+        </div>
       </div>
+
+      <!-- Music popout — playlist sidebar / now-playing only renders
+           in the Music tab itself; this is for fullscreen mode. -->
     </main>
 
     <script type="module" src="src/main.js"></script>

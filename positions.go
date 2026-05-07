@@ -9,22 +9,13 @@ import (
 	"time"
 )
 
-// Resume-playback persistence. Saved positions are keyed by the video's
-// forward-slash relative path (Channel/[Folder/]File.ext) so they
-// survive moving the library between machines (unlike the thumbnail
-// cache, which is keyed by absolute path because it predates this).
-//
-// Persisted to Videos/.state.json. The file is small (one entry per
-// in-progress video) so we just rewrite it on every Save — no
-// background flush, no rotating writes. Loss on crash / force-quit is
-// acceptable; per the product spec the worst case is the user starts
-// a video from the beginning.
+// Resume-playback persistence. Saved positions are keyed by the
+// video's forward-slash relative path under Videos/ (Channel/[Folder/]
+// File.ext), and stored per-account at .data/accounts/<id>/positions.json
+// so each account has their own watch progress.
 
-const positionsFile = ".state.json"
+const positionsFile = "positions.json"
 
-// positionEntry is one saved bookmark. Updated is a Unix timestamp,
-// kept around purely for future use (e.g. pruning entries older than
-// some window so the file doesn't grow unbounded across years).
 type positionEntry struct {
 	Pos     float64 `json:"pos"`
 	Updated int64   `json:"updated"`
@@ -35,123 +26,63 @@ type positionsFileFormat struct {
 }
 
 type positionStore struct {
-	mu        sync.Mutex
-	libDir    string
-	positions map[string]positionEntry
-	loaded    bool
+	mu      sync.Mutex
+	storeFn func(accountID string) (string, error)
+	cache   map[string]map[string]positionEntry // accountID → relPath → entry
+	loaded  map[string]bool                     // accountID → has loaded?
 }
 
-func newPositionStore() *positionStore {
-	return &positionStore{positions: make(map[string]positionEntry)}
-}
-
-// setLibDir reloads from disk under the given library root. Called
-// after the App locates the Videos/ directory at startup.
-func (s *positionStore) setLibDir(dir string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.libDir = dir
-	s.positions = make(map[string]positionEntry)
-	s.loaded = false
-	s.loadLocked()
-}
-
-func (s *positionStore) loadLocked() {
-	if s.libDir == "" || s.loaded {
-		return
+func newPositionStore(stateDirFn func(string) (string, error)) *positionStore {
+	return &positionStore{
+		storeFn: stateDirFn,
+		cache:   make(map[string]map[string]positionEntry),
+		loaded:  make(map[string]bool),
 	}
-	data, err := os.ReadFile(filepath.Join(s.libDir, positionsFile))
+}
+
+func (s *positionStore) loadLocked(accountID string) (map[string]positionEntry, error) {
+	if s.loaded[accountID] {
+		return s.cache[accountID], nil
+	}
+	dir, err := s.storeFn(accountID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// First run — no file yet. Mark loaded so we don't keep
-			// retrying on every Get; future Saves will create it.
-			s.loaded = true
+		return nil, err
+	}
+	m := make(map[string]positionEntry)
+	data, err := os.ReadFile(filepath.Join(dir, positionsFile))
+	if err == nil {
+		var f positionsFileFormat
+		if err := json.Unmarshal(data, &f); err == nil && f.Positions != nil {
+			m = f.Positions
 		}
-		// Any other error (USB hiccup, permission glitch) leaves
-		// loaded=false so the next access tries again — otherwise
-		// we'd silently overwrite the on-disk file with an empty
-		// in-memory map on the next Save.
-		return
+		s.loaded[accountID] = true
+	} else if errors.Is(err, os.ErrNotExist) {
+		s.loaded[accountID] = true
+	} else {
+		return nil, err
 	}
-	var f positionsFileFormat
-	if err := json.Unmarshal(data, &f); err != nil {
-		// Corrupt file — leave the in-memory map empty AND mark
-		// loaded so we don't keep failing the same parse on every
-		// access. The next Save will overwrite the bad file.
-		s.loaded = true
-		return
-	}
-	if f.Positions != nil {
-		s.positions = f.Positions
-	}
-	s.loaded = true
+	s.cache[accountID] = m
+	return m, nil
 }
 
-func (s *positionStore) get(relPath string) float64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.loadLocked()
-	return s.positions[relPath].Pos
-}
-
-func (s *positionStore) set(relPath string, sec float64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.libDir == "" {
-		return errors.New("library not loaded")
-	}
-	s.loadLocked()
-	s.positions[relPath] = positionEntry{Pos: sec, Updated: time.Now().Unix()}
-	return s.persistLocked()
-}
-
-func (s *positionStore) clear(relPath string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.libDir == "" {
+func (s *positionStore) persistLocked(accountID string) error {
+	m := s.cache[accountID]
+	if m == nil {
 		return nil
 	}
-	s.loadLocked()
-	if _, ok := s.positions[relPath]; !ok {
-		return nil
-	}
-	delete(s.positions, relPath)
-	return s.persistLocked()
-}
-
-// rename relocates a position entry — called from cache-migration paths
-// when a video or its parent folder/channel is renamed or moved.
-func (s *positionStore) rename(oldRel, newRel string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.libDir == "" {
-		return
-	}
-	s.loadLocked()
-	if e, ok := s.positions[oldRel]; ok {
-		delete(s.positions, oldRel)
-		s.positions[newRel] = e
-		_ = s.persistLocked()
-	}
-}
-
-// persistLocked writes the current map back to disk. Caller must hold
-// s.mu. Best-effort: failures (e.g. read-only USB) are returned but
-// don't corrupt the in-memory map, so subsequent gets still work.
-func (s *positionStore) persistLocked() error {
-	out := positionsFileFormat{Positions: s.positions}
-	data, err := json.MarshalIndent(out, "", "  ")
+	dir, err := s.storeFn(accountID)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.libDir, positionsFile)
+	data, err := json.MarshalIndent(positionsFileFormat{Positions: m}, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, positionsFile)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	// Clean up the tmp file if Rename fails (e.g. USB suddenly read-only
-	// or yanked) — otherwise we'd accumulate one tmp per failed save in
-	// the user's library root.
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
@@ -159,34 +90,144 @@ func (s *positionStore) persistLocked() error {
 	return nil
 }
 
-// ---- JS-callable methods bound on App (defined in app.go) -----------------
-
-// GetPosition returns the saved playback position in seconds, or 0 if
-// none exists. The frontend decides whether to actually resume (e.g.
-// it skips the resume when the saved position is in the first 45 s or
-// the last 20 s of the video).
-func (a *App) GetPosition(relPath string) float64 {
-	if a.positions == nil {
+func (s *positionStore) get(accountID, relPath string) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.loadLocked(accountID)
+	if err != nil {
 		return 0
 	}
-	return a.positions.get(relPath)
+	return m[relPath].Pos
 }
 
-// SavePosition records the current playback position for a video. The
-// frontend calls this on a timer while playing, on close, and on
-// beforeunload so the bookmark survives ⌘W and app quit.
-func (a *App) SavePosition(relPath string, sec float64) error {
-	if a.positions == nil {
-		return errors.New("library not loaded")
+func (s *positionStore) set(accountID, relPath string, sec float64) error {
+	if accountID == "" {
+		return errors.New("no current account")
 	}
-	return a.positions.set(relPath, sec)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.loadLocked(accountID)
+	if err != nil {
+		return err
+	}
+	m[relPath] = positionEntry{Pos: sec, Updated: time.Now().Unix()}
+	return s.persistLocked(accountID)
 }
 
-// ClearPosition removes the saved position. The frontend calls this
-// when a video plays to completion so the next play starts fresh.
-func (a *App) ClearPosition(relPath string) error {
-	if a.positions == nil {
+func (s *positionStore) clear(accountID, relPath string) error {
+	if accountID == "" {
 		return nil
 	}
-	return a.positions.clear(relPath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.loadLocked(accountID)
+	if err != nil {
+		return err
+	}
+	if _, ok := m[relPath]; !ok {
+		return nil
+	}
+	delete(m, relPath)
+	return s.persistLocked(accountID)
+}
+
+// renameAcrossAccounts updates every account's bookmark map (loaded
+// + cold) so `oldRel` is rebound to `newRel`. Walks disk to handle
+// accounts not yet loaded into memory this session, so a video
+// rename never leaves stale bookmarks anywhere.
+func (s *positionStore) renameAcrossAccounts(oldRel, newRel string) {
+	s.walkAllPositionsFiles(func(m map[string]positionEntry) bool {
+		if e, ok := m[oldRel]; ok {
+			delete(m, oldRel)
+			m[newRel] = e
+			return true
+		}
+		return false
+	})
+}
+
+// clearAcrossAccounts drops `relPath` from every account's map
+// (loaded + cold). Called from DeleteVideo.
+func (s *positionStore) clearAcrossAccounts(relPath string) {
+	s.walkAllPositionsFiles(func(m map[string]positionEntry) bool {
+		if _, ok := m[relPath]; ok {
+			delete(m, relPath)
+			return true
+		}
+		return false
+	})
+}
+
+// walkAllPositionsFiles is the positionStore equivalent of
+// subscriptionStore.walkAllSubsFiles. See that method for the
+// rationale: channel/video changes must affect every account, even
+// ones that haven't been logged into this session.
+func (s *positionStore) walkAllPositionsFiles(mutator func(map[string]positionEntry) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for accountID, m := range s.cache {
+		if mutator(m) {
+			_ = s.persistLocked(accountID)
+		}
+	}
+	if s.storeFn == nil {
+		return
+	}
+	probeDir, err := s.storeFn("__probe")
+	if err != nil {
+		return
+	}
+	parentDir := filepath.Dir(probeDir)
+	_ = os.RemoveAll(probeDir)
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		if _, ok := s.cache[id]; ok {
+			continue
+		}
+		path := filepath.Join(parentDir, id, positionsFile)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var f positionsFileFormat
+		if err := json.Unmarshal(data, &f); err != nil {
+			continue
+		}
+		m := f.Positions
+		if m == nil {
+			continue
+		}
+		if mutator(m) {
+			s.cache[id] = m
+			s.loaded[id] = true
+			_ = s.persistLocked(id)
+		}
+	}
+}
+
+// importLegacy seeds the given account's bookmarks with positions
+// from a v1-style flat positions map. Used during the v1→v2 drive
+// upgrade when the first account is created.
+func (s *positionStore) importLegacy(accountID string, legacy map[string]positionEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.loadLocked(accountID)
+	if err != nil {
+		return err
+	}
+	for k, v := range legacy {
+		// Don't overwrite anything the new account already had — but
+		// during a fresh upgrade there's nothing yet.
+		if _, exists := m[k]; !exists {
+			m[k] = v
+		}
+	}
+	return s.persistLocked(accountID)
 }

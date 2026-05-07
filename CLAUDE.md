@@ -23,6 +23,8 @@ The frontend "build" (`frontend/build.js`) just copies `index.html` + `src/` int
 
 As of v1.1.0 there are NO runtime tool dependencies. yt-dlp ships embedded; the video+audio stream merge that previously needed ffmpeg is done by the pure-Go muxer in [muxer.go](muxer.go). See the "Editor + capability gating" section.
 
+**v2.0.0 introduced a major restructure**: drive layout now has a `.data/` directory at the drive root (sibling to `Videos/`) for accounts, playlists, subscriptions, and per-account watch progress; a new `Music/` tree (sibling to `Videos/`) with the same Artist/Album/Song layout convention; and three tabs in the UI (Accounts / Videos / Music). The bottom status bar is gone — its stats live on the Accounts tab. v1→v2 drive upgrade is detected at startup and prompts the user; see [boot.go](boot.go).
+
 ## Architecture
 
 ### Wails binding model
