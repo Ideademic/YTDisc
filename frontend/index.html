@@ -8,8 +8,9 @@
   </head>
   <body data-tab="videos">
     <main id="app">
-      <!-- Tab strip on the very left, replacing the bottom status bar
-           in v1. The active tab swaps the right-hand columns. -->
+      <!-- Tab strip across the top of the leftmost column. Three
+           buttons for the three tabs, with the current-account
+           "chip" on the right showing whose session this is. -->
       <nav class="tabs">
         <button class="tab" data-tab="accounts" aria-label="Accounts">
           <span class="tab-icon">👤</span>
@@ -22,11 +23,6 @@
         <button class="tab" data-tab="music" aria-label="Music">
           <span class="tab-icon">♪</span>
           <span class="tab-label">Music</span>
-        </button>
-        <div class="tab-spacer"></div>
-        <button class="tab tab-current-account" id="current-account-chip" aria-label="Current account">
-          <span class="profile-pic profile-pic-sm" id="chip-profile-pic"></span>
-          <span class="tab-label" id="chip-username">…</span>
         </button>
       </nav>
 

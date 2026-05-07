@@ -133,15 +133,19 @@ func (a *App) startup(ctx context.Context) {
 	hasDataDir := dirExists(dataDir)
 	hasV1Marker := fileExists(filepath.Join(videosDir, ".state.json"))
 
+	// CRITICAL: set the path fields AND the boot state BEFORE the
+	// library scan. ScanLibrary parses every MP4's moov box and on a
+	// USB drive with hundreds of videos that takes several seconds.
+	// If the JS frontend calls GetBootState() during that window
+	// (which it does — it's the very first call from init()), it'd
+	// see the zero-value `State: ""` and fall through to a "no
+	// current account" UI. Setting the boot state from cheap stat
+	// checks here closes the race.
 	a.mu.Lock()
 	a.driveRoot = root
 	a.videosDir = videosDir
 	a.musicDir = musicDir
 	a.dataDir = dataDir
-	a.library = ScanLibrary(videosDir)
-	if dirExists(musicDir) {
-		a.music = ScanMusicLibrary(musicDir)
-	}
 	a.mu.Unlock()
 
 	switch {
@@ -208,8 +212,34 @@ func (a *App) startup(ctx context.Context) {
 	// back to user-cache dir if read-only). Same logic as v1.1.0.
 	go a.extractEmbeddedYtdlpAsync()
 
-	// Kick off thumbnail discovery for the existing library.
+	// Library scan + thumbnail discovery in the background. Boot
+	// state is already set above so the frontend's first
+	// GetBootState() call resolves immediately, even on slow drives
+	// where the scan takes seconds. Channels()/Items() etc. handle
+	// `library == nil` by returning empty results, which is fine
+	// for the brief startup window.
+	go a.initialScan()
+}
+
+// initialScan runs the first library + music scan and queues the
+// thumbnail-discovery walk. Split out so startup() can return
+// immediately once boot state is known.
+func (a *App) initialScan() {
+	a.mu.RLock()
+	videosDir := a.videosDir
+	musicDir := a.musicDir
+	a.mu.RUnlock()
+	if videosDir == "" {
+		return
+	}
+	lib := ScanLibrary(videosDir)
+	var music *MusicLibrary
+	if dirExists(musicDir) {
+		music = ScanMusicLibrary(musicDir)
+	}
 	a.mu.Lock()
+	a.library = lib
+	a.music = music
 	a.thumbWalkTag++
 	tag := a.thumbWalkTag
 	a.mu.Unlock()

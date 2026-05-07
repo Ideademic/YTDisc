@@ -28,7 +28,7 @@
   --scrollbar-hover: #5c4737;
   --code-bg: #2a1f17;
 
-  --tab-w: 140px;
+  --tabs-h: 36px;
 }
 
 * { box-sizing: border-box; }
@@ -45,61 +45,88 @@ html, body {
 
 #app {
   display: grid;
-  grid-template-columns: var(--tab-w) 1fr;
-  grid-template-rows: 100vh;
+  grid-template-columns: 220px 320px 1fr;
+  grid-template-rows: var(--tabs-h) 1fr;
   width: 100vw;
   height: 100vh;
 }
 
 .hidden { display: none !important; }
 
-/* ---- Tab strip --------------------------------------------------------- */
+/* ---- Tab strip (horizontal, only over the first column) --------------
+ * The tab strip lives in row 1 col 1 of the #app grid. Cols 2 and 3
+ * are taken up by the tab-content area, which spans BOTH rows so the
+ * top of cols 2+3 isn't an empty gap. Only the leftmost column of
+ * tab-content shifts into row 2 to make room for the tab strip.
+ */
 
 .tabs {
+  grid-column: 1;
+  grid-row: 1;
   background: var(--bg-col-alt);
   border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   display: flex;
-  flex-direction: column;
-  padding: 12px 0;
-  gap: 2px;
+  flex-direction: row;
+  padding: 0;
 }
 .tab {
+  flex: 1;
   background: transparent;
   border: none;
+  border-right: 1px solid var(--border);
   color: var(--fg-dim);
-  text-align: left;
-  padding: 10px 14px;
+  padding: 0 6px;
   font: inherit;
-  font-size: 13px;
+  font-size: 11.5px;
   cursor: pointer;
   display: flex;
-  gap: 10px;
+  gap: 4px;
   align-items: center;
+  justify-content: center;
   transition: background 0.12s, color 0.12s;
   border-radius: 0;
+  min-width: 0;
 }
+.tab:last-child { border-right: none; }
 .tab:hover { background: var(--bg-hover); color: var(--fg); }
-.tab.active {
-  background: var(--accent);
-  color: white;
-}
-.tab-icon { font-size: 14px; min-width: 18px; text-align: center; }
-.tab-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tab-spacer { flex: 1; }
-.tab-current-account {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-  margin-top: 8px;
-}
+.tab.active { background: var(--accent); color: white; }
+.tab-icon { font-size: 12px; }
+.tab-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* ---- Tab content (3-column grid) -------------------------------------- */
+/* ---- Tab content (3-column grid, mirrors #app's outer grid) ---------- */
 
 .tab-content {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
   display: grid;
   grid-template-columns: 220px 320px 1fr;
-  height: 100vh;
+  grid-template-rows: var(--tabs-h) 1fr;
   overflow: hidden;
   position: relative;
+}
+/* Leftmost column is offset to row 2 so the tabs strip sits above it.
+   Cols 2+3 span both rows = full window height. */
+.tab-content > .col:nth-child(1) {
+  grid-column: 1;
+  grid-row: 2;
+}
+.tab-content > .col:nth-child(2) {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+.tab-content > .col:nth-child(3) {
+  grid-column: 3;
+  grid-row: 1 / -1;
+}
+
+/* Accounts tab uses 2 columns (account list 220px + stats panel
+   filling the rest), so the empty 3rd column doesn't show. */
+.tab-content[data-tab-content="accounts"] {
+  grid-template-columns: 220px 1fr;
+}
+.tab-content[data-tab-content="accounts"] > .col:nth-child(2) {
+  grid-column: 2;
 }
 
 .col {

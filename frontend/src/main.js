@@ -104,7 +104,6 @@ async function postBoot() {
       window.addEventListener("pagehide", () => savePlayerPosition({ flushOnly: true }));
       postBootRan = true;
     }
-    setupChip();
     setActiveTab(state.currentAccount?.lastTab || "videos");
     document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
     switchTab(state.tab);
@@ -232,16 +231,8 @@ async function switchTab(name) {
   }
 }
 
-// ---- Account chip --------------------------------------------------------
-
-function setupChip() {
-  const acct = state.currentAccount;
-  if (!acct) return;
-  $("chip-username").textContent = acct.username;
-  setProfileGradient($("chip-profile-pic"), acct.colorA, acct.colorB, acct.angle);
-}
-
-$("current-account-chip").addEventListener("click", () => switchTab("accounts"));
+// (Account chip removed in v2.0.0 layout revision — current account
+//  is implicit via the Accounts tab's "selected" highlight.)
 
 // ===========================================================================
 // ACCOUNTS TAB
