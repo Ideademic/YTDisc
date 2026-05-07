@@ -126,7 +126,13 @@ html, body {
   grid-template-rows: var(--tabs-h) 1fr;
   overflow: hidden;
   position: relative;
+  /* The container's row 1 col 1 cell sits OVER the tab strip (which
+     lives in the parent grid at the same coordinates). Without this,
+     the empty cell intercepts every click/hover targeted at the tabs.
+     Children re-enable pointer events for their own bounds. */
+  pointer-events: none;
 }
+.tab-content > * { pointer-events: auto; }
 /* Leftmost column is offset to row 2 so the tabs strip sits above it.
    Cols 2+3 span both rows = full window height. */
 .tab-content > .col:nth-child(1) {

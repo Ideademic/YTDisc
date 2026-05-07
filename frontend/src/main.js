@@ -278,7 +278,6 @@ async function renderAccountsTab() {
         await App.SwitchAccount(acct.id);
         state.currentAccount = (await App.GetCurrentAccount()) || null;
         document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
-        setupChip();
         await refreshEditCapability(false);
         // Auto-leave the Accounts tab to whichever tab the new account
         // was last on (or videos by default). For Editor we go to
