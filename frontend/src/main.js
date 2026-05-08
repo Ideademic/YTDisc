@@ -84,6 +84,17 @@ async function init() {
   await postBoot();
 }
 
+// realAccount unwraps the value-type Account that the backend sends
+// (BootState.currentAccount and GetCurrentAccount() are both value
+// types — when there's no current account the field is the
+// zero-value Account with id == ""). Use this when assigning to
+// state.currentAccount so the rest of the JS can keep doing its
+// existing `if (state.currentAccount)` and `state.currentAccount?.X`
+// checks.
+function realAccount(maybeAcct) {
+  return maybeAcct && maybeAcct.id ? maybeAcct : null;
+}
+
 // postBoot is everything that runs once we're definitively in the
 // "ready" state (i.e. there's a current account). Called after init,
 // after AcceptDriveUpgrade, and after first-account creation. Wraps
@@ -94,7 +105,7 @@ let postBootRan = false;
 async function postBoot() {
   try {
     state.bootState = await App.GetBootState();
-    state.currentAccount = state.bootState.currentAccount;
+    state.currentAccount = realAccount(state.bootState.currentAccount);
     state.accounts = await App.GetAccounts();
     await refreshEditCapability(false);
     if (!postBootRan) {
@@ -293,7 +304,7 @@ async function renderAccountsTab() {
             setTimeout(() => $("first-account-name").focus(), 50);
             return;
           }
-          state.currentAccount = (await App.GetCurrentAccount()) || null;
+          state.currentAccount = realAccount(await App.GetCurrentAccount());
           document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
           renderUserBar();
           state.accounts = await App.GetAccounts();
@@ -306,7 +317,7 @@ async function renderAccountsTab() {
       // Click on a row → switch to that account.
       try {
         await App.SwitchAccount(acct.id);
-        state.currentAccount = (await App.GetCurrentAccount()) || null;
+        state.currentAccount = realAccount(await App.GetCurrentAccount());
         document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
         renderUserBar();
         await refreshEditCapability(false);

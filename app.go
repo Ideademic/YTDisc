@@ -82,11 +82,18 @@ type App struct {
 
 // BootState is the first thing the frontend asks for. The frontend
 // branches on .State to render the appropriate boot UI.
+//
+// CurrentAccount is a value, not a pointer — when there's no current
+// account, it's a zero-value Account (id == ""). Using a value type
+// avoids edge cases in Wails' JSON serialization of pointer fields
+// that we hit when first shipping v2.0.0 (the field would silently
+// arrive as undefined on the JS side even when the backend had a
+// valid pointer set).
 type BootState struct {
-	State            string  `json:"state"`            // "ready" | "needs-upgrade" | "needs-first-account" | "no-library"
-	Message          string  `json:"message,omitempty"` // human-readable detail for "no-library"
-	CurrentAccount   *Account `json:"currentAccount,omitempty"`
-	HasMusicLibrary  bool    `json:"hasMusicLibrary"`
+	State           string  `json:"state"`             // "ready" | "needs-upgrade" | "needs-first-account" | "data-corrupt" | "no-library"
+	Message         string  `json:"message,omitempty"` // human-readable detail for "no-library"
+	CurrentAccount  Account `json:"currentAccount"`
+	HasMusicLibrary bool    `json:"hasMusicLibrary"`
 }
 
 func NewApp() *App {
@@ -201,10 +208,11 @@ func (a *App) startup(ctx context.Context) {
 			a.mu.Lock()
 			a.bootStateField = BootState{
 				State:           "ready",
-				CurrentAccount:  &acct,
+				CurrentAccount:  acct,
 				HasMusicLibrary: dirExists(musicDir),
 			}
 			a.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "[ytdisc] boot: ready as account %q (id=%s)\n", acct.Username, acct.ID)
 		}
 	}
 
@@ -473,15 +481,19 @@ func (a *App) GetAccounts() []Account {
 	return a.accounts.list()
 }
 
-func (a *App) GetCurrentAccount() *Account {
+// GetCurrentAccount returns the currently-logged-in account. If
+// there's no current account, the returned Account has ID == "".
+// (Value type for the same JSON-serialization-safety reasons that
+// drove BootState.CurrentAccount.)
+func (a *App) GetCurrentAccount() Account {
 	id := a.accounts.currentID()
 	if id == "" {
-		return nil
+		return Account{}
 	}
 	if acct, ok := a.accounts.byID(id); ok {
-		return &acct
+		return acct
 	}
-	return nil
+	return Account{}
 }
 
 func (a *App) CreateAccount(username, colorA, colorB string, angle int) (Account, error) {
@@ -517,7 +529,7 @@ func (a *App) DeleteAccount(id string) error {
 		if next := a.accounts.resolveStartupAccount(); next == "" {
 			a.mu.Lock()
 			a.bootStateField.State = "needs-first-account"
-			a.bootStateField.CurrentAccount = nil
+			a.bootStateField.CurrentAccount = Account{}
 			a.mu.Unlock()
 			return nil
 		}
@@ -547,12 +559,12 @@ func (a *App) refreshBootStateAfterAccountChange() {
 		// Shouldn't happen on a normal switch, but if it does treat
 		// as first-account again.
 		a.bootStateField.State = "needs-first-account"
-		a.bootStateField.CurrentAccount = nil
+		a.bootStateField.CurrentAccount = Account{}
 		return
 	}
 	if acct, ok := a.accounts.byID(id); ok {
 		a.bootStateField.State = "ready"
-		a.bootStateField.CurrentAccount = &acct
+		a.bootStateField.CurrentAccount = acct
 	}
 }
 
