@@ -29,6 +29,7 @@
   --code-bg: #2a1f17;
 
   --tabs-h: 48px;
+  --userbar-h: 30px;
 }
 
 * { box-sizing: border-box; }
@@ -46,7 +47,10 @@ html, body {
 #app {
   display: grid;
   grid-template-columns: 220px 320px 1fr;
-  grid-template-rows: var(--tabs-h) 1fr;
+  /* Three rows now: tab strip, user-bar (logged-in-as strip), then
+     the tab content fills the rest. Putting the user-bar in its own
+     row across the full width means every tab sees it. */
+  grid-template-rows: var(--tabs-h) var(--userbar-h) 1fr;
   width: 100vw;
   height: 100vh;
 }
@@ -120,45 +124,37 @@ html, body {
 .album-btn .icon { width: 14px; height: 14px; vertical-align: -0.15em; }
 .play-btn .icon { width: 16px; height: 16px; vertical-align: -0.15em; }
 
-/* ---- Tab content (3-column grid, mirrors #app's outer grid) ---------- */
+/* ---- "Logged in as …" persistent strip ------------------------------- */
+
+#user-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  background: var(--bg-col);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+.user-bar-text { color: var(--fg-dim); }
+.user-bar-text strong { color: var(--fg); font-weight: 600; }
+
+/* ---- Tab content (3-column grid below the user-bar) ------------------ */
 
 .tab-content {
   grid-column: 1 / -1;
-  grid-row: 1 / -1;
+  grid-row: 3;
   display: grid;
   grid-template-columns: 220px 320px 1fr;
-  grid-template-rows: var(--tabs-h) 1fr;
   overflow: hidden;
   position: relative;
-  /* The container's row 1 col 1 cell sits OVER the tab strip (which
-     lives in the parent grid at the same coordinates). Without this,
-     the empty cell intercepts every click/hover targeted at the tabs.
-     Children re-enable pointer events for their own bounds. */
-  pointer-events: none;
-}
-.tab-content > * { pointer-events: auto; }
-/* Leftmost column is offset to row 2 so the tabs strip sits above it.
-   Cols 2+3 span both rows = full window height. */
-.tab-content > .col:nth-child(1) {
-  grid-column: 1;
-  grid-row: 2;
-}
-.tab-content > .col:nth-child(2) {
-  grid-column: 2;
-  grid-row: 1 / -1;
-}
-.tab-content > .col:nth-child(3) {
-  grid-column: 3;
-  grid-row: 1 / -1;
 }
 
 /* Accounts tab uses 2 columns (account list 220px + stats panel
    filling the rest), so the empty 3rd column doesn't show. */
 .tab-content[data-tab-content="accounts"] {
   grid-template-columns: 220px 1fr;
-}
-.tab-content[data-tab-content="accounts"] > .col:nth-child(2) {
-  grid-column: 2;
 }
 
 .col {
@@ -325,6 +321,39 @@ body.is-editor .list li.selected .row-actions { display: flex; }
 /* ---- Accounts tab ----------------------------------------------------- */
 
 .account-row { gap: 10px; }
+/* Account rows always show their per-row actions (the delete-account
+   button), even without hover/select and regardless of editor mode —
+   the user needs to be able to delete their own account from any
+   account context. Editor's row never renders an action button (we
+   refuse to delete it backend-side), so there's nothing to gate. */
+.account-row .row-actions { display: flex; }
+
+/* Current account gets an unmistakable "you" pill next to the name
+   AND a left-edge accent stripe via .selected so it's identifiable
+   from across the room. */
+.current-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.account-row.selected {
+  position: relative;
+}
+.account-row.selected::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
 .stats-panel {
   /* Fill the column rather than being capped at 720px — at narrower
      window widths the cap was making the auto-fit grid collapse to

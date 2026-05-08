@@ -507,6 +507,21 @@ func (a *App) DeleteAccount(id string) error {
 		return err
 	}
 	a.editCap.invalidate()
+	// If we just deleted the currently-logged-in account (or the
+	// last real account), pick a different one to log in to. If
+	// none exist, drop the boot state to "needs-first-account" so
+	// the frontend re-prompts for creation — quitting and
+	// reopening lands in the same modal, no escape into a
+	// logged-out state.
+	if a.accounts.currentID() == "" {
+		if next := a.accounts.resolveStartupAccount(); next == "" {
+			a.mu.Lock()
+			a.bootStateField.State = "needs-first-account"
+			a.bootStateField.CurrentAccount = nil
+			a.mu.Unlock()
+			return nil
+		}
+	}
 	a.refreshBootStateAfterAccountChange()
 	return nil
 }

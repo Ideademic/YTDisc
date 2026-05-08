@@ -26,6 +26,14 @@
         </button>
       </nav>
 
+      <!-- Persistent "logged in as" strip below the tabs. Spans all
+           three columns so it shows on every tab. JS keeps it in
+           sync with the current account. -->
+      <div id="user-bar">
+        <span class="profile-pic profile-pic-sm" id="user-bar-avatar"></span>
+        <span class="user-bar-text">Logged in as <strong id="user-bar-name">…</strong></span>
+      </div>
+
       <!-- VIDEOS tab — the v1 three-column browser, plus a Manage
            Subscriptions affordance at the bottom of the channels
            column. When manage-subs mode is active, columns 2+3 swap

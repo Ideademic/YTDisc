@@ -303,9 +303,12 @@ func (s *accountStore) create(username, colorA, colorB string, angle int) (Accou
 }
 
 // del removes a non-editor account and its per-account state dir.
-// Refuses to delete Editor (which is built-in) and refuses to delete
-// the only remaining real account (otherwise the next launch would
-// hit the "no accounts" first-run state and prompt creation again).
+// Refuses to delete the Editor singleton; otherwise allows deletion
+// even of the last real account — the caller (App.DeleteAccount) is
+// responsible for re-arming the boot-state machinery so the user is
+// immediately prompted to create another. Quitting the app at that
+// point and reopening lands in the same first-account modal, so
+// there's no escape into a logged-out state.
 func (s *accountStore) del(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,20 +316,14 @@ func (s *accountStore) del(id string) error {
 		return errors.New("can't delete the Editor account")
 	}
 	idx := -1
-	realCount := 0
 	for i, a := range s.accounts {
-		if !a.IsEditor {
-			realCount++
-		}
 		if a.ID == id {
 			idx = i
+			break
 		}
 	}
 	if idx < 0 {
 		return fmt.Errorf("no account with id %q", id)
-	}
-	if realCount <= 1 {
-		return errors.New("can't delete the last account — create another first")
 	}
 	s.accounts = append(s.accounts[:idx], s.accounts[idx+1:]...)
 	if s.lastUsedAccountID == id {

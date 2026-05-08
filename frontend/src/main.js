@@ -106,6 +106,7 @@ async function postBoot() {
     }
     setActiveTab(state.currentAccount?.lastTab || "videos");
     document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
+    renderUserBar();
     switchTab(state.tab);
   } catch (err) {
     console.error("postBoot failed:", err);
@@ -231,8 +232,18 @@ async function switchTab(name) {
   }
 }
 
-// (Account chip removed in v2.0.0 layout revision — current account
-//  is implicit via the Accounts tab's "selected" highlight.)
+// ---- "Logged in as ..." strip --------------------------------------------
+
+function renderUserBar() {
+  const acct = state.currentAccount;
+  if (!acct) {
+    $("user-bar-name").textContent = "—";
+    $("user-bar-avatar").style.background = "transparent";
+    return;
+  }
+  $("user-bar-name").textContent = acct.username;
+  setProfileGradient($("user-bar-avatar"), acct.colorA, acct.colorB, acct.angle);
+}
 
 // ===========================================================================
 // ACCOUNTS TAB
@@ -248,10 +259,11 @@ async function renderAccountsTab() {
     if (state.currentAccount && acct.id === state.currentAccount.id) {
       li.classList.add("selected");
     }
+    const isCurrent = state.currentAccount && acct.id === state.currentAccount.id;
     li.innerHTML = `
       <span class="profile-pic profile-pic-md"></span>
       <div class="row-main">
-        <span class="title">${escapeHTML(acct.username)}</span>
+        <span class="title">${escapeHTML(acct.username)}${isCurrent ? ` <span class="current-badge">you</span>` : ""}</span>
         <span class="meta">${acct.isEditor ? "Editor — can modify the library" : "Account"}</span>
       </div>
       <div class="row-actions">
@@ -263,9 +275,27 @@ async function renderAccountsTab() {
       const action = e.target.closest("[data-action]")?.dataset?.action;
       if (action === "del") {
         e.stopPropagation();
-        if (!confirm(`Delete account "${acct.username}"? Their watch progress and playlists will be removed.`)) return;
+        if (!confirm(`Delete account "${acct.username}"? Their watch progress and playlists will be permanently removed.`)) return;
         try {
           await App.DeleteAccount(acct.id);
+          // After deletion, re-read boot state. If the backend
+          // dropped us into "needs-first-account" (meaning no real
+          // accounts remain), show the modal — same one as fresh-
+          // drive setup, blocking so the user can't escape into a
+          // logged-out app even by quitting and reopening.
+          const boot = await App.GetBootState();
+          if (boot.state === "needs-first-account") {
+            state.bootState = boot;
+            state.currentAccount = null;
+            renderUserBar();
+            setupProfileForm("first-account");
+            showModal($("first-account-modal"));
+            setTimeout(() => $("first-account-name").focus(), 50);
+            return;
+          }
+          state.currentAccount = (await App.GetCurrentAccount()) || null;
+          document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
+          renderUserBar();
           state.accounts = await App.GetAccounts();
           renderAccountsTab();
         } catch (err) {
@@ -278,6 +308,7 @@ async function renderAccountsTab() {
         await App.SwitchAccount(acct.id);
         state.currentAccount = (await App.GetCurrentAccount()) || null;
         document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
+        renderUserBar();
         await refreshEditCapability(false);
         // For Editor we deliberately STAY on the Accounts tab — Editor
         // is for admin tasks and the user picks where to go next. For
@@ -303,10 +334,26 @@ async function renderAccountsTab() {
 async function renderStatsPanel() {
   const status = await App.Status();
   const panel = $("stats-panel");
+  // The library scan runs on a background goroutine after startup,
+  // so the very first Status() call (right after boot) returns
+  // ok=false even on a healthy drive. Show a placeholder and re-poll
+  // until the scan finishes — without this, the stats panel showed
+  // "Couldn't find a Videos/ folder" until the user clicked
+  // somewhere, which made it look like the app was permanently
+  // confused.
   if (!status.ok) {
-    panel.innerHTML = `<p class="muted">${escapeHTML(status.message || "")}</p>`;
+    panel.innerHTML = `<p class="muted">${escapeHTML(status.message || "Loading library…")}</p>`;
+    clearTimeout(state.statsRetryTimer);
+    state.statsRetryTimer = setTimeout(() => {
+      // Only retry if the user is still on the Accounts tab; if they
+      // switched away there's no point updating an off-screen panel,
+      // and the next Accounts visit will trigger a fresh render.
+      if (state.tab === "accounts") renderStatsPanel();
+    }, 800);
     return;
   }
+  clearTimeout(state.statsRetryTimer);
+  state.statsRetryTimer = null;
   panel.innerHTML = `
     <h2 class="stats-heading">Library</h2>
     <div class="stats-grid">
