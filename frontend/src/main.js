@@ -279,13 +279,17 @@ async function renderAccountsTab() {
         state.currentAccount = (await App.GetCurrentAccount()) || null;
         document.body.classList.toggle("is-editor", !!state.currentAccount?.isEditor);
         await refreshEditCapability(false);
-        // Auto-leave the Accounts tab to whichever tab the new account
-        // was last on (or videos by default). For Editor we go to
-        // videos.
-        const dest = state.currentAccount?.isEditor
-          ? "videos"
-          : (state.currentAccount?.lastTab || "videos");
-        switchTab(dest);
+        // For Editor we deliberately STAY on the Accounts tab — Editor
+        // is for admin tasks and the user picks where to go next. For
+        // a regular account, jump to whatever tab they had open at
+        // last close so they land where they left off.
+        if (!state.currentAccount?.isEditor) {
+          switchTab(state.currentAccount?.lastTab || "videos");
+        } else {
+          // Just re-render the Accounts tab so the "selected" highlight
+          // moves to the Editor row and the stats refresh.
+          renderAccountsTab();
+        }
       } catch (err) {
         alert(String(err));
       }

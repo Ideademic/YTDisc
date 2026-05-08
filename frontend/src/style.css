@@ -28,7 +28,7 @@
   --scrollbar-hover: #5c4737;
   --code-bg: #2a1f17;
 
-  --tabs-h: 36px;
+  --tabs-h: 48px;
 }
 
 * { box-sizing: border-box; }
@@ -76,17 +76,21 @@ html, body {
   border: none;
   border-right: 1px solid var(--border);
   color: var(--fg-dim);
-  padding: 0 6px;
+  padding: 4px 4px;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 10.5px;
   cursor: pointer;
+  /* Stack icon over label so the cramped 220px / 3 = ~73px tab can
+     fit "Accounts" without truncating. */
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
   align-items: center;
   justify-content: center;
   transition: background 0.12s, color 0.12s;
   border-radius: 0;
   min-width: 0;
+  line-height: 1.1;
 }
 .tab:last-child { border-right: none; }
 .tab:hover { background: var(--bg-hover); color: var(--fg); }
@@ -106,7 +110,7 @@ html, body {
   flex-shrink: 0;
   pointer-events: none; /* clicks pass through to the parent button */
 }
-.tab .icon { width: 16px; height: 16px; vertical-align: -0.2em; }
+.tab .icon { width: 18px; height: 18px; vertical-align: 0; }
 .add-btn .icon, .row-btn .icon { width: 14px; height: 14px; vertical-align: -0.1em; }
 .modal-close .icon { width: 16px; height: 16px; }
 .np-btn .icon { width: 16px; height: 16px; }
@@ -321,12 +325,22 @@ body.is-editor .list li.selected .row-actions { display: flex; }
 /* ---- Accounts tab ----------------------------------------------------- */
 
 .account-row { gap: 10px; }
-.stats-panel { padding: 32px; max-width: 720px; margin: 0 auto; }
+.stats-panel {
+  /* Fill the column rather than being capped at 720px — at narrower
+     window widths the cap was making the auto-fit grid collapse to
+     a single column. The cells themselves have their own minimum
+     widths via the grid `minmax`, so the panel itself can be as
+     wide as the column. */
+  padding: 24px;
+}
 .stats-heading { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim); margin: 0 0 16px; }
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 16px;
+  /* Smaller min so the auto-fit picks up extra columns at common
+     widths. At ~600px panel width this gives 4 columns; at ~1000px
+     it gives 7+. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
 }
 .stat-cell {
   background: var(--bg-col);

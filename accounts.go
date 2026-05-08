@@ -149,24 +149,33 @@ func (s *accountStore) IsCorrupt() bool {
 }
 
 // ensureEditorLocked guarantees the Editor account exists in the
-// accounts slice (always at index 0). Safe to call repeatedly.
+// accounts slice with the canonical appearance. Editor isn't user-
+// customizable (username, colors, angle are all fixed) so we
+// force-overwrite any stored Editor record with the canonical
+// values on every load. That way bumping the Editor visual style
+// in a future release applies to existing drives without a manual
+// migration step.
 func (s *accountStore) ensureEditorLocked() {
-	for _, a := range s.accounts {
-		if a.IsEditor {
-			return
-		}
-	}
-	editor := Account{
+	canonical := Account{
 		ID:        EditorAccountID,
 		Username:  "Editor",
-		ColorA:    "#e85d7a", // accent pink
-		ColorB:    "#1a1310", // deep espresso
+		ColorA:    "#7a7a7a", // medium gray
+		ColorB:    "#2e2e2e", // dark gray
 		Angle:     45,
 		IsEditor:  true,
 		LastTab:   "videos",
 		CreatedAt: time.Now().Unix(),
 	}
-	s.accounts = append([]Account{editor}, s.accounts...)
+	for i, a := range s.accounts {
+		if a.IsEditor {
+			// Preserve the original CreatedAt so account ordering
+			// (by CreatedAt asc) stays stable across launches.
+			canonical.CreatedAt = a.CreatedAt
+			s.accounts[i] = canonical
+			return
+		}
+	}
+	s.accounts = append([]Account{canonical}, s.accounts...)
 }
 
 func (s *accountStore) persistLocked() error {
