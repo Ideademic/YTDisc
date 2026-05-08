@@ -595,7 +595,13 @@ type ManifestItem struct {
 }
 
 func fetchManifestForURL(ctx context.Context, ytdlp, url string) ManifestEntry {
-	entry := ManifestEntry{URL: url, Kind: "single", Title: url}
+	// Items is initialized to an empty slice (not nil) so it
+	// serializes to a JSON `[]` rather than `null` even when yt-dlp
+	// fails or times out. The frontend assumes `entry.items.length`
+	// is safe to read; nil → null → `null.length` was throwing
+	// silently inside the manifest-fetch click handler's catch
+	// block, making the whole flow look like "nothing happened".
+	entry := ManifestEntry{URL: url, Kind: "single", Title: url, Items: []ManifestItem{}}
 	c, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 

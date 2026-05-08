@@ -1057,11 +1057,15 @@ function renderManifestList() {
   const ul = $("addvideo-manifest");
   ul.innerHTML = "";
   for (const entry of manifestEntries) {
+    // Defensive: Go nil slices used to serialize as `null`. Backend
+    // is fixed to send `[]` now, but coerce here so any future
+    // regression doesn't crash the flow with `null.length`.
+    const items = entry.items || [];
     const li = document.createElement("li");
     li.className = "manifest-entry";
-    const itemsHTML = entry.items.length > 1
+    const itemsHTML = items.length > 1
       ? `<ul class="manifest-items">` +
-        entry.items.map((it, i) => `
+        items.map((it, i) => `
           <li class="manifest-item" data-key="${escapeHTML(entry.url)}::${i}">
             <span class="mi-title">${escapeHTML(it.title)}</span>
             <div class="mi-progress"><div class="mi-bar"></div></div>
@@ -1070,7 +1074,7 @@ function renderManifestList() {
            <span class="mi-title">${escapeHTML(entry.title)}</span>
            <div class="mi-progress"><div class="mi-bar"></div></div>
          </div>`;
-    li.innerHTML = `<div class="manifest-head">${icon(entry.kind === "playlist" ? "folder" : "play")} ${escapeHTML(entry.title)} <span class="muted">(${entry.items.length} item${entry.items.length === 1 ? "" : "s"})</span></div>${itemsHTML}`;
+    li.innerHTML = `<div class="manifest-head">${icon(entry.kind === "playlist" ? "folder" : "play")} ${escapeHTML(entry.title)} <span class="muted">(${items.length} item${items.length === 1 ? "" : "s"})</span></div>${itemsHTML}`;
     ul.appendChild(li);
   }
 }

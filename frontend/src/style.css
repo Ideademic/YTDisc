@@ -125,18 +125,25 @@ html, body {
 .play-btn .icon { width: 16px; height: 16px; vertical-align: -0.15em; }
 
 /* ---- "Logged in as …" persistent strip ------------------------------- */
+/* Sits in the leftmost column only — same width as the tabs and the
+   leftmost content column below, so the whole left rail reads as one
+   continuous lane: tabs / user / list. Cols 2 and 3 of row 2 stay
+   empty (background-color visible) for a clean header look. */
 
 #user-bar {
-  grid-column: 1 / -1;
+  grid-column: 1;
   grid-row: 2;
   background: var(--bg-col);
+  border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 14px;
   font-size: 12px;
+  min-width: 0;
 }
+.user-bar-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-bar-text { color: var(--fg-dim); }
 .user-bar-text strong { color: var(--fg); font-weight: 600; }
 
