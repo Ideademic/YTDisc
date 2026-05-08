@@ -720,8 +720,20 @@ function renderArtistList() {
       <div class="row-main artist-head">
         <span class="title">${icon(expanded ? 'caret-down' : 'caret-right')} ${escapeHTML(ar.name)}</span>
         <span class="meta">${ar.albumCount} album${ar.albumCount === 1 ? "" : "s"} · ${ar.songCount} song${ar.songCount === 1 ? "" : "s"}</span>
+      </div>
+      <div class="row-actions editor-only">
+        <button class="row-btn" data-action="rename-artist" title="Rename artist">${icon('pencil-simple')}</button>
+        <button class="row-btn" data-action="del-artist" title="Delete artist">${icon('trash')}</button>
       </div>`;
-    li.addEventListener("click", () => {
+    li.addEventListener("click", (e) => {
+      const a = e.target.closest("[data-action]")?.dataset?.action;
+      if (a === "rename-artist") { e.stopPropagation(); openRenameArtist(ar.name); return; }
+      if (a === "del-artist") {
+        e.stopPropagation();
+        if (!confirm(`Move artist "${ar.name}" and all their albums + songs to trash?`)) return;
+        App.DeleteArtist(ar.name).then(() => renderMusicTab()).catch((err) => alert(String(err)));
+        return;
+      }
       if (state.expandedArtists.has(ar.name)) state.expandedArtists.delete(ar.name);
       else state.expandedArtists.add(ar.name);
       renderArtistList();
@@ -738,10 +750,12 @@ function renderArtistList() {
             <span class="meta">${al.songCount} song${al.songCount === 1 ? "" : "s"} · ${formatDuration(al.totalSecs)}</span>
           </div>
           <div class="row-actions editor-only">
+            <button class="row-btn" data-action="rename-album" title="Rename album">${icon('pencil-simple')}</button>
             <button class="row-btn" data-action="del-album" title="Delete album">${icon('trash')}</button>
           </div>`;
         ali.addEventListener("click", (e) => {
           const a = e.target.closest("[data-action]")?.dataset?.action;
+          if (a === "rename-album") { e.stopPropagation(); openRenameAlbum(ar.name, al.name); return; }
           if (a === "del-album") {
             e.stopPropagation();
             if (!confirm(`Move album "${al.name}" to trash?`)) return;
@@ -776,12 +790,14 @@ async function selectAlbum(artist, album) {
       <div class="row-actions">
         <button class="row-btn" data-action="play" title="Play">${icon('play')}</button>
         <button class="row-btn editor-only" data-action="add-mv" title="Attach music video">${icon('film-strip')}</button>
+        <button class="row-btn editor-only" data-action="rename" title="Rename song">${icon('pencil-simple')}</button>
         <button class="row-btn editor-only" data-action="del" title="Delete song">${icon('trash')}</button>
       </div>`;
     li.addEventListener("click", (e) => {
       const a = e.target.closest("[data-action]")?.dataset?.action;
       if (a === "play") { e.stopPropagation(); playSong(s, songs); }
       else if (a === "add-mv") { e.stopPropagation(); openAttachMVModal(s); }
+      else if (a === "rename") { e.stopPropagation(); openRenameSong(s); }
       else if (a === "del") {
         e.stopPropagation();
         if (!confirm(`Move "${s.title}" to trash?`)) return;
@@ -1328,6 +1344,24 @@ function openRenameVideo(v) {
   $("rename-modal-hint").textContent = "New name (extension is preserved):";
   openRenameModal(v.name);
 }
+function openRenameArtist(name) {
+  state.renameTarget = { kind: "artist", currentName: name };
+  $("rename-modal-title").textContent = "Rename artist";
+  $("rename-modal-hint").textContent = `Renames the artist's folder. Their albums and songs come along.`;
+  openRenameModal(name);
+}
+function openRenameAlbum(artist, album) {
+  state.renameTarget = { kind: "album", currentName: album, artist };
+  $("rename-modal-title").textContent = "Rename album";
+  $("rename-modal-hint").textContent = `Album by ${artist}.`;
+  openRenameModal(album);
+}
+function openRenameSong(song) {
+  state.renameTarget = { kind: "song", currentName: song.title, relPath: song.relPath, artist: song.artist, album: song.album };
+  $("rename-modal-title").textContent = "Rename song";
+  $("rename-modal-hint").textContent = "New name (extension is preserved):";
+  openRenameModal(song.title);
+}
 function openRenameModal(value) {
   $("rename-input").value = value;
   setStatusEl($("rename-status"), "");
@@ -1342,22 +1376,49 @@ $("rename-save-btn").addEventListener("click", async () => {
   try {
     if (t.kind === "channel") {
       await App.RenameChannel(t.currentName, newName);
-      // Renaming the channel invalidates the selectedChannel pointer;
-      // re-target so renderVideosTab picks the renamed channel.
-      if (state.selectedChannel === t.currentName) {
-        state.selectedChannel = newName;
-      }
+      if (state.selectedChannel === t.currentName) state.selectedChannel = newName;
+      state.itemsByKey.clear();
+      hideModal($("rename-modal"));
+      await renderVideosTab();
     } else if (t.kind === "folder") {
       await App.RenameFolder(t.channel, t.currentName, newName);
-      if (state.currentFolder === t.currentName) {
-        state.currentFolder = newName;
-      }
-    } else {
+      if (state.currentFolder === t.currentName) state.currentFolder = newName;
+      state.itemsByKey.clear();
+      hideModal($("rename-modal"));
+      await renderVideosTab();
+    } else if (t.kind === "video") {
       await App.RenameVideo(t.relPath, newName);
+      state.itemsByKey.clear();
+      hideModal($("rename-modal"));
+      await renderVideosTab();
+    } else if (t.kind === "artist") {
+      await App.RenameArtist(t.currentName, newName);
+      // If the user was browsing this artist's albums, update the
+      // selected-artist pointer so the expansion stays open after
+      // the rescan.
+      if (state.selectedArtist === t.currentName) state.selectedArtist = newName;
+      if (state.expandedArtists.has(t.currentName)) {
+        state.expandedArtists.delete(t.currentName);
+        state.expandedArtists.add(newName);
+      }
+      hideModal($("rename-modal"));
+      await renderMusicTab();
+    } else if (t.kind === "album") {
+      await App.RenameAlbum(t.artist, t.currentName, newName);
+      if (state.selectedAlbum === t.currentName) state.selectedAlbum = newName;
+      hideModal($("rename-modal"));
+      await renderMusicTab();
+      if (state.selectedArtist && state.selectedAlbum) {
+        await selectAlbum(state.selectedArtist, state.selectedAlbum);
+      }
+    } else if (t.kind === "song") {
+      await App.RenameSong(t.relPath, newName);
+      hideModal($("rename-modal"));
+      await renderMusicTab();
+      if (state.selectedArtist && state.selectedAlbum) {
+        await selectAlbum(state.selectedArtist, state.selectedAlbum);
+      }
     }
-    state.itemsByKey.clear();
-    hideModal($("rename-modal"));
-    await renderVideosTab();
   } catch (err) { setStatusEl($("rename-status"), String(err), "error"); }
 });
 $("rename-cancel-btn").addEventListener("click", () => hideModal($("rename-modal")));

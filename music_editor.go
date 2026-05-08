@@ -164,6 +164,131 @@ func (a *App) DeleteSong(relPath string) error {
 	return nil
 }
 
+// RenameSong renames a song's audio file. The new title preserves
+// the original extension. Sidecars (album art image + attached
+// music video) follow the rename.
+func (a *App) RenameSong(relPath, newTitle string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
+	newTitle = strings.TrimSpace(newTitle)
+	if err := validateFileName(newTitle); err != nil {
+		return err
+	}
+	abs, err := a.absMusicPath(relPath)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(abs)
+	ext := filepath.Ext(abs)
+	newAbs := filepath.Join(parent, newTitle+ext)
+	if newAbs == abs {
+		return nil
+	}
+	if _, err := os.Stat(newAbs); err == nil {
+		return errors.New("a file with that name already exists")
+	}
+	if err := os.Rename(abs, newAbs); err != nil {
+		return err
+	}
+	// Move sidecars (image art + .mp4 music video) alongside.
+	oldStem := strings.TrimSuffix(abs, ext)
+	newStem := strings.TrimSuffix(newAbs, ext)
+	for _, sidExt := range append(append([]string{}, sidecarExts...), ".mp4") {
+		oldSide := oldStem + sidExt
+		if _, err := os.Stat(oldSide); err == nil {
+			_ = os.Rename(oldSide, newStem+sidExt)
+		}
+	}
+	a.Rescan()
+	return nil
+}
+
+// RenameAlbum renames the album directory under a specific artist.
+func (a *App) RenameAlbum(artist, oldAlbum, newAlbum string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
+	newAlbum = strings.TrimSpace(newAlbum)
+	if err := validateChannelName(newAlbum); err != nil {
+		return err
+	}
+	if oldAlbum == newAlbum {
+		return nil
+	}
+	a.mu.RLock()
+	root := a.musicDir
+	a.mu.RUnlock()
+	if root == "" {
+		return errors.New("music library not loaded")
+	}
+	oldDir := filepath.Join(root, artist, oldAlbum)
+	newDir := filepath.Join(root, artist, newAlbum)
+	if _, err := os.Stat(newDir); err == nil {
+		return fmt.Errorf("album %q already exists for %q", newAlbum, artist)
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return err
+	}
+	a.Rescan()
+	return nil
+}
+
+// RenameArtist renames the top-level artist directory, taking all
+// its albums + songs along.
+func (a *App) RenameArtist(oldName, newName string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
+	newName = strings.TrimSpace(newName)
+	if err := validateChannelName(newName); err != nil {
+		return err
+	}
+	if oldName == newName {
+		return nil
+	}
+	a.mu.RLock()
+	root := a.musicDir
+	a.mu.RUnlock()
+	if root == "" {
+		return errors.New("music library not loaded")
+	}
+	oldDir := filepath.Join(root, oldName)
+	newDir := filepath.Join(root, newName)
+	if _, err := os.Stat(newDir); err == nil {
+		return fmt.Errorf("artist %q already exists", newName)
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return err
+	}
+	a.Rescan()
+	return nil
+}
+
+// DeleteArtist moves an artist's entire directory (with all albums
+// and songs inside) to Music/.trash/. Recoverable until the user
+// empties the trash manually.
+func (a *App) DeleteArtist(name string) error {
+	if err := a.requireEditor(); err != nil {
+		return err
+	}
+	a.mu.RLock()
+	root := a.musicDir
+	a.mu.RUnlock()
+	if root == "" {
+		return errors.New("music library not loaded")
+	}
+	src := filepath.Join(root, name)
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("artist %q not found", name)
+	}
+	if err := moveToTrash(root, src); err != nil {
+		return err
+	}
+	a.Rescan()
+	return nil
+}
+
 // DeleteAlbum moves an entire album directory to .trash. The artist
 // directory is left even if it becomes empty — the user might just
 // want to add another album to that artist later.
@@ -295,33 +420,36 @@ func (a *App) AddMusic(urls []string) error {
 	return firstErr
 }
 
-// fetchMusicMeta uses yt-dlp's --print to pull the YouTube Music
-// metadata fields we need to place the file. For albums we pull the
-// playlist title; for singles we pull the artist + track name.
-// All errors fall back to the caller's defaults.
+// fetchMusicMeta uses yt-dlp's --print to pull the artist + album
+// metadata we need to place the downloaded file in
+// Music/<Artist>/<Album>/. Crucially we do NOT use --flat-playlist
+// here — that only gives playlist-level fields, which for YouTube
+// Music albums often come back as "NA" or as the raw "Artist - Topic"
+// channel name. Doing a real metadata extraction on the first item
+// (--skip-download means no actual audio is fetched) returns the
+// proper `artist`/`album` tags YouTube Music encodes per-track.
+//
+// For both album and single URLs we try a chain of field aliases so
+// any one of them landing populates the result. Final cleanup strips
+// the "- Topic" suffix that YouTube Music attaches to auto-generated
+// artist channels. All errors fall back to the caller's defaults
+// ("Unknown Artist" etc.) without aborting the download.
 func fetchMusicMeta(ctx context.Context, ytdlp, url string, isAlbum bool) (artist, container string, err error) {
-	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	args := []string{
 		"--quiet",
 		"--no-warnings",
+		"--skip-download",
+		"--playlist-items", "1",
+		"--print", "%(artist,album_artist,creator,uploader)s",
+		"--print", "%(album,playlist_title)s",
 	}
-	if isAlbum {
-		args = append(args,
-			"--flat-playlist",
-			"--playlist-items", "1",
-			"--print", "%(playlist_uploader,uploader,artist)s",
-			"--print", "%(playlist_title,album)s",
-			"--", url,
-		)
-	} else {
-		args = append(args,
-			"--no-playlist",
-			"--print", "%(artist,uploader,creator)s",
-			"--print", "%(album)s",
-			"--", url,
-		)
+	if !isAlbum {
+		args = append(args, "--no-playlist")
 	}
+	args = append(args, "--", url)
+
 	out, err := exec.CommandContext(c, ytdlp, args...).Output()
 	if err != nil {
 		return "", "", err
@@ -333,6 +461,10 @@ func fetchMusicMeta(ctx context.Context, ytdlp, url string, isAlbum bool) (artis
 	if len(lines) >= 2 && lines[1] != "" && lines[1] != "NA" {
 		container = lines[1]
 	}
+	// YouTube Music auto-generated artist channels are named
+	// "Real Artist - Topic". Strip the suffix so files land under
+	// the actual artist name.
+	artist = strings.TrimSuffix(artist, " - Topic")
 	return artist, container, nil
 }
 
