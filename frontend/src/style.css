@@ -147,21 +147,36 @@ html, body {
 .user-bar-text { color: var(--fg-dim); }
 .user-bar-text strong { color: var(--fg); font-weight: 600; }
 
-/* ---- Tab content (3-column grid below the user-bar) ------------------ */
+/* ---- Tab content placement -------------------------------------------
+ * Each `.tab-content` group is `display: contents` — its three .col
+ * children participate in the OUTER #app grid directly. That lets us
+ * give the leftmost col its own row (below tabs + user-bar) while
+ * keeping cols 2 and 3 spanning the full window height. The tab
+ * strip and user-bar live in col 1 rows 1-2 only; nothing else
+ * exists in row 1-2 of cols 2-3, so those cells show the body
+ * background — making the left rail feel like one continuous unit
+ * (tabs / user / list) and the right cols feel like they fill the
+ * entire window. */
 
-.tab-content {
-  grid-column: 1 / -1;
+.tab-content { display: contents; }
+
+.tab-content > .col:nth-child(1) {
+  grid-column: 1;
   grid-row: 3;
-  display: grid;
-  grid-template-columns: 220px 320px 1fr;
-  overflow: hidden;
-  position: relative;
+}
+.tab-content > .col:nth-child(2) {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+.tab-content > .col:nth-child(3) {
+  grid-column: 3;
+  grid-row: 1 / -1;
 }
 
 /* Accounts tab uses 2 columns (account list 220px + stats panel
-   filling the rest), so the empty 3rd column doesn't show. */
-.tab-content[data-tab-content="accounts"] {
-  grid-template-columns: 220px 1fr;
+   filling cols 2+3). Override the 2nd .col to span both right cols. */
+.tab-content[data-tab-content="accounts"] > .col:nth-child(2) {
+  grid-column: 2 / -1;
 }
 
 .col {
